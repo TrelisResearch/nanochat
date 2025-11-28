@@ -48,10 +48,9 @@ def apply_rotary_emb(x, cos, sin):
     out = out.to(x.dtype) # ensure input/output dtypes match
     return out
 
-class CausalSelfAttention(nn.Module):
-    def __init__(self, config, layer_idx):
+class DiffusionSelfAttention(nn.Module):
+    def __init__(self, config):
         super().__init__()
-        self.layer_idx = layer_idx
         self.n_head = config.n_head
         self.n_kv_head = config.n_kv_head
         self.n_embd = config.n_embd
@@ -63,7 +62,7 @@ class CausalSelfAttention(nn.Module):
         self.c_v = nn.Linear(self.n_embd, self.n_kv_head * self.head_dim, bias=False)
         self.c_proj = nn.Linear(self.n_embd, self.n_embd, bias=False)
 
-    def forward(self, x, cos_sin, kv_cache):
+    def forward(self, x, cos_sin):
         B, T, C = x.size()
 
         # Project the input to get queries, keys, and values
@@ -77,32 +76,9 @@ class CausalSelfAttention(nn.Module):
         q, k = norm(q), norm(k) # QK norm
         q, k, v = q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2) # make head be batch dim, i.e. (B, T, H, D) -> (B, H, T, D)
 
-        # Apply KV cache: insert current k,v into cache, get the full view so far
-        if kv_cache is not None:
-            k, v = kv_cache.insert_kv(self.layer_idx, k, v)
-        Tq = q.size(2) # number of queries in this forward pass
-        Tk = k.size(2) # number of keys/values in total (in the cache + current forward pass)
-
-        # Attention: queries attend to keys/values autoregressively. A few cases to handle:
-        enable_gqa = self.n_head != self.n_kv_head # Group Query Attention (GQA): duplicate key/value heads to match query heads if desired
-        if kv_cache is None or Tq == Tk:
-            # During training (no KV cache), attend as usual with causal attention
-            # And even if there is KV cache, we can still use this simple version when Tq == Tk
-            y = F.scaled_dot_product_attention(q, k, v, is_causal=True, enable_gqa=enable_gqa)
-        elif Tq == 1:
-            # During inference but with a single query in this forward pass:
-            # The query has to attend to all the keys/values in the cache
-            y = F.scaled_dot_product_attention(q, k, v, is_causal=False, enable_gqa=enable_gqa)
-        else:
-            # During inference AND we have a chunk of queries in this forward pass:
-            # First, each query attends to all the cached keys/values (i.e. full prefix)
-            attn_mask = torch.zeros((Tq, Tk), dtype=torch.bool, device=q.device) # True = keep, False = mask
-            prefix_len = Tk - Tq
-            if prefix_len > 0: # can't be negative but could be zero
-                attn_mask[:, :prefix_len] = True
-            # Then, causal attention within this chunk
-            attn_mask[:, prefix_len:] = torch.tril(torch.ones((Tq, Tq), dtype=torch.bool, device=q.device))
-            y = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask, enable_gqa=enable_gqa)
+        # Bidirectional attention (no causal mask)
+        enable_gqa = self.n_head != self.n_kv_head
+        y = F.scaled_dot_product_attention(q, k, v, is_causal=False, enable_gqa=enable_gqa)
 
         # Re-assemble the heads side by side and project back to residual stream
         y = y.transpose(1, 2).contiguous().view(B, T, -1)
@@ -124,13 +100,13 @@ class MLP(nn.Module):
 
 
 class Block(nn.Module):
-    def __init__(self, config, layer_idx):
+    def __init__(self, config):
         super().__init__()
-        self.attn = CausalSelfAttention(config, layer_idx)
+        self.attn = DiffusionSelfAttention(config)
         self.mlp = MLP(config)
 
-    def forward(self, x, cos_sin, kv_cache):
-        x = x + self.attn(norm(x), cos_sin, kv_cache)
+    def forward(self, x, cos_sin):
+        x = x + self.attn(norm(x), cos_sin)
         x = x + self.mlp(norm(x))
         return x
 
@@ -141,7 +117,7 @@ class GPT(nn.Module):
         self.config = config
         self.transformer = nn.ModuleDict({
             "wte": nn.Embedding(config.vocab_size, config.n_embd),
-            "h": nn.ModuleList([Block(config, layer_idx) for layer_idx in range(config.n_layer)]),
+            "h": nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
         })
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
         # To support meta device initialization, we init the rotary embeddings here, but it's fake
@@ -241,67 +217,49 @@ class GPT(nn.Module):
                 group["initial_lr"] = group["lr"]
         return optimizers
 
-    def forward(self, idx, targets=None, kv_cache=None, loss_reduction='mean'):
+    def forward(self, idx, loss_mask=None, seq_lens=None, targets=None, loss_reduction='mean'):
+        """
+        Forward pass.
+        - idx: (B, T) token ids
+        - loss_mask: optional bool tensor (B, T) selecting which positions were masked in the forward process
+        - seq_lens: optional lengths per row (used for scaling the loss)
+        """
         B, T = idx.size()
 
         # Grab the rotary embeddings for the current sequence length (they are of shape (1, seq_len, 1, head_dim/2))
         assert T <= self.cos.size(1), f"Sequence length grew beyond the rotary embeddings cache: {T} > {self.cos.size(1)}"
         assert idx.device == self.cos.device, f"Rotary embeddings and idx are on different devices: {idx.device} != {self.cos.device}"
         assert self.cos.dtype == torch.bfloat16, "Rotary embeddings must be in bfloat16"
-        # if kv cache exists, we need to offset the rotary embeddings to the current position in the cache
-        T0 = 0 if kv_cache is None else kv_cache.get_pos()
-        cos_sin = self.cos[:, T0:T0+T], self.sin[:, T0:T0+T] # truncate cache to current sequence length
+        cos_sin = self.cos[:, :T], self.sin[:, :T] # truncate cache to current sequence length
 
         # Forward the trunk of the Transformer
         x = self.transformer.wte(idx)
         x = norm(x)
         for block in self.transformer.h:
-            x = block(x, cos_sin, kv_cache)
+            x = block(x, cos_sin)
         x = norm(x)
 
         # Forward the lm_head (compute logits)
         softcap = 15
-        if targets is not None:
-            # training mode: compute and return the loss
-            # TODO: experiment with Liger Kernels / chunked cross-entropy etc.
-            logits = self.lm_head(x)
-            logits = softcap * torch.tanh(logits / softcap) # logits softcap
-            logits = logits.float() # use tf32/fp32 for logits
-            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1, reduction=loss_reduction)
-            return loss
-        else:
-            # inference mode: compute and return the logits
-            logits = self.lm_head(x)
-            logits = softcap * torch.tanh(logits / softcap) # logits softcap
+        logits = self.lm_head(x)
+        logits = softcap * torch.tanh(logits / softcap)
+
+        if loss_mask is None:
             return logits
 
-    @torch.inference_mode()
-    def generate(self, tokens, max_tokens, temperature=1.0, top_k=None, seed=42):
-        """
-        Naive autoregressive streaming inference.
-        To make it super simple, let's assume:
-        - batch size is 1
-        - ids and the yielded tokens are simple Python lists and ints
-        """
-        assert isinstance(tokens, list)
-        device = self.get_device()
-        rng = None
-        if temperature > 0:
-            rng = torch.Generator(device=device)
-            rng.manual_seed(seed)
-        ids = torch.tensor([tokens], dtype=torch.long, device=device) # add batch dim
-        for _ in range(max_tokens):
-            logits = self.forward(ids) # (B, T, vocab_size)
-            logits = logits[:, -1, :] # (B, vocab_size)
-            if top_k is not None:
-                v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
-                logits[logits < v[:, [-1]]] = -float('Inf')
-            if temperature > 0:
-                logits = logits / temperature
-                probs = F.softmax(logits, dim=-1)
-                next_ids = torch.multinomial(probs, num_samples=1, generator=rng)
-            else:
-                next_ids = torch.argmax(logits, dim=-1, keepdim=True)
-            ids = torch.cat((ids, next_ids), dim=1)
-            token = next_ids.item()
-            yield token
+        assert seq_lens is not None, "seq_lens must be provided when computing the masked diffusion loss"
+        if targets is None:
+            targets = idx
+        loss_mask = loss_mask.to(dtype=torch.bool)
+        ce = F.cross_entropy(
+            logits.reshape(-1, logits.size(-1)),
+            targets.reshape(-1),
+            reduction='none'
+        ).view(B, T)
+        masked_loss = ce * loss_mask
+        mask_counts = loss_mask.sum(dim=1).clamp(min=1)
+        seq_lens = seq_lens.to(dtype=torch.float32)
+        loss_per_row = masked_loss.sum(dim=1) * (seq_lens / mask_counts)
+        if loss_reduction == 'none':
+            return loss_per_row
+        return loss_per_row.mean()

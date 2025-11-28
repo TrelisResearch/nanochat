@@ -13,6 +13,8 @@ from functools import lru_cache
 SPECIAL_TOKENS = [
     # every document begins with the Beginning of Sequence (BOS) token that delimits documents
     "<|bos|>",
+    # diffusion needs an explicit mask token for corruption
+    "<|mask|>",
     # tokens below are only used during finetuning to render Conversations into token ids
     "<|user_start|>", # user messages
     "<|user_end|>",

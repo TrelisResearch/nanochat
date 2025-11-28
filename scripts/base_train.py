@@ -26,6 +26,7 @@ from nanochat.tokenizer import get_tokenizer, get_token_bytes
 from nanochat.checkpoint_manager import save_checkpoint, load_checkpoint
 from nanochat.loss_eval import evaluate_bpb
 from nanochat.engine import Engine
+from nanochat.diffusion import sample_diffusion_mask, apply_diffusion_mask
 from scripts.base_eval import evaluate_model
 print_banner()
 
@@ -82,6 +83,7 @@ wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(project="nanochat", 
 
 # Tokenizer will be useful for evaluation, also we need the vocab size
 tokenizer = get_tokenizer()
+mask_token_id = tokenizer.encode_special("<|mask|>")
 token_bytes = get_token_bytes(device=device)
 vocab_size = tokenizer.get_vocab_size()
 print0(f"Vocab size: {vocab_size:,}")
@@ -221,7 +223,7 @@ while True:
         val_loader = build_val_loader()
         eval_steps = eval_tokens // (device_batch_size * max_seq_len * ddp_world_size)
         with autocast_ctx:
-            val_bpb = evaluate_bpb(model, val_loader, eval_steps, token_bytes)
+            val_bpb = evaluate_bpb(model, val_loader, eval_steps, token_bytes, mask_token_id)
         print0(f"Step {step:05d} | Validation bpb: {val_bpb:.4f}")
         if val_bpb < min_val_bpb:
             min_val_bpb = val_bpb
@@ -266,7 +268,7 @@ while True:
         for prompt in prompts:
             tokens = tokenizer(prompt, prepend="<|bos|>")
             with autocast_ctx:
-                sample, _ = engine.generate_batch(tokens, num_samples=1, max_tokens=16, temperature=0)
+                sample, _ = engine.generate_batch(tokens, num_samples=1, response_length=16, diffusion_steps=16, temperature=0)
             print0(tokenizer.decode(sample[0]))
         model.train()
 
@@ -304,8 +306,12 @@ while True:
     synchronize()
     t0 = time.time()
     for micro_step in range(grad_accum_steps):
+        tokens = x
+        eligible_mask = torch.ones_like(tokens, dtype=torch.bool)
+        loss_mask, seq_lens = sample_diffusion_mask(eligible_mask)
+        corrupted = apply_diffusion_mask(tokens, loss_mask, mask_token_id)
         with autocast_ctx:
-            loss = model(x, y)
+            loss = model(corrupted, loss_mask=loss_mask, seq_lens=seq_lens, targets=tokens)
         train_loss = loss.detach() # for logging
         loss = loss / grad_accum_steps # each .backward() is a grad sum => normalize loss here
         loss.backward()

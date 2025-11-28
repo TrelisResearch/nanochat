@@ -28,7 +28,7 @@ from tasks.spellingbee import SpellingBee
 # -----------------------------------------------------------------------------
 # Generative evaluation loop (we go one problem at a time, sample, evaluate)
 
-def run_generative_eval(task_object, tokenizer, model, engine, num_samples, max_new_tokens, temperature, top_k, max_problems=None):
+def run_generative_eval(task_object, tokenizer, model, engine, num_samples, max_new_tokens, diffusion_steps, temperature, top_k, max_problems=None):
 
     ddp, ddp_rank, ddp_local_rank, ddp_world_size = get_dist_info()
     device = model.get_device()
@@ -46,7 +46,8 @@ def run_generative_eval(task_object, tokenizer, model, engine, num_samples, max_
         results, _ = engine.generate_batch(
             encoded_prompt,
             num_samples=num_samples,
-            max_tokens=max_new_tokens,
+            response_length=max_new_tokens,
+            diffusion_steps=diffusion_steps,
             temperature=temperature,
             top_k=top_k,
         )
@@ -87,7 +88,7 @@ def run_generative_eval(task_object, tokenizer, model, engine, num_samples, max_
 # A lot easier because we don't have to sample. Therefore, we can actually go
 # batches at a time and just check the logits for correct answer choices.
 
-def run_categorical_eval(task_object, tokenizer, model, batch_size, max_problems=None):
+def run_categorical_eval(task_object, tokenizer, model, batch_size, max_problems=None, mask_token_id=None):
 
     ddp, ddp_rank, ddp_local_rank, ddp_world_size = get_dist_info()
     device = model.get_device()
@@ -99,44 +100,84 @@ def run_categorical_eval(task_object, tokenizer, model, batch_size, max_problems
     num_batches = ceil_div(num_problems, batch_size)
 
     # Run the evaluation
-    letter_to_id_cache = {} # many letters will repeat often, let's save the tokenizer some work
+    letter_to_id_cache = {}
     num_passed, total = 0, 0
-    for i in range(ddp_rank, num_batches, ddp_world_size):
-        i0, i1 = i * batch_size, min((i + 1) * batch_size, num_problems)
-
-        # Prepare the batch of problems. They might all be of different length, so we pad/collate them.
+    assistant_start = tokenizer.encode_special("<|assistant_start|>")
+    assistant_end = tokenizer.encode_special("<|assistant_end|>")
+    for batch_idx in range(ddp_rank, num_batches, ddp_world_size):
+        i0, i1 = batch_idx * batch_size, min((batch_idx + 1) * batch_size, num_problems)
         conversations = [task_object[ii] for ii in range(i0, i1)]
-        prompt_ids = [tokenizer.render_for_completion(conversation) for conversation in conversations] # TODO: remake the way this works
-        max_length = max(len(ids) for ids in prompt_ids)
-        answer_time_positions = [len(ids) - 1 for ids in prompt_ids] # where the last token is (and the predicted answer)
-        padded_prompt_ids = [ids + [bos] * (max_length - len(ids)) for ids in prompt_ids]
-        prompt_ids = torch.tensor(padded_prompt_ids, dtype=torch.long, device=device)
 
-        # Get the logits for the whole batch of conversations in parallel (efficiency win here)
+        if mask_token_id is None or assistant_start is None or assistant_end is None:
+            prompt_ids = [tokenizer.render_for_completion(convo) for convo in conversations]
+            max_length = max(len(ids) for ids in prompt_ids)
+            answer_positions = [len(ids) - 1 for ids in prompt_ids]
+            padded = [ids + [bos] * (max_length - len(ids)) for ids in prompt_ids]
+            input_ids = torch.tensor(padded, dtype=torch.long, device=device)
+            with torch.no_grad():
+                logits = model(input_ids)
+            for idx, conversation in enumerate(conversations):
+                letters = conversation['letters']
+                letter_ids = []
+                for letter in letters:
+                    if letter not in letter_to_id_cache:
+                        encoded_letter = tokenizer.encode(letter)
+                        assert len(encoded_letter) == 1, "Each letter must be a single token"
+                        letter_to_id_cache[letter] = encoded_letter
+                    letter_ids.append(letter_to_id_cache[letter][0])
+                answer_pos = answer_positions[idx]
+                focus_logits = logits[idx, answer_pos, letter_ids]
+                pred_idx = focus_logits.argmax(dim=-1).item()
+                predicted_letter = letters[pred_idx]
+                outcome = task_object.evaluate(conversation, predicted_letter)
+                num_passed += int(outcome)
+                total += 1
+            continue
+
+        masked_sequences = []
+        original_sequences = []
+        spans = []
+        for convo in conversations:
+            ids, _ = tokenizer.render_conversation(convo)
+            original_sequences.append(ids)
+            start_idx = max(idx for idx, tok in enumerate(ids) if tok == assistant_start)
+            end_idx = next(idx for idx in range(start_idx + 1, len(ids)) if ids[idx] == assistant_end)
+            answer_start = start_idx + 1
+            answer_end = end_idx
+            spans.append((answer_start, answer_end))
+            seq_copy = ids.copy()
+            # Replace the actual assistant response tokens with <|mask|> so logits correspond to the true continuation.
+            seq_copy[answer_start:answer_end] = [mask_token_id] * max(answer_end - answer_start, 1)
+            masked_sequences.append(seq_copy)
+
+        max_len = max(len(seq) for seq in masked_sequences)
+        padded_masked = [seq + [bos] * (max_len - len(seq)) for seq in masked_sequences]
+        padded_original = [seq + [bos] * (max_len - len(seq)) for seq in original_sequences]
+        input_ids = torch.tensor(padded_masked, dtype=torch.long, device=device)
         with torch.no_grad():
-            logits = model(prompt_ids) # (B, T, V)
+            logits = model(input_ids)
 
-        # Focus on the available answer on just the letters corresponding to choices
-        # Note that this helps the evaluation a lot because it specifically narrows the focus to only the available letters
-        # The much harder alternative would be to just generate from the Assistant and check if it responded with the correct
-        # letter (e.g. A, B, C, D), but evaluations typically make the task easier in this way.
         for idx, conversation in enumerate(conversations):
-            # get the token ids of all the available letters of this problem
+            si, ei = spans[idx]
+            span_len = ei - si
+            assert span_len > 0, "Assistant response span must contain at least one token"
+            span_logits = logits[idx, si:ei, :]
             letters = conversation['letters']
-            letter_ids = []
+            candidate_losses = []
             for letter in letters:
-                if not letter in letter_to_id_cache:
+                if letter not in letter_to_id_cache:
                     encoded_letter = tokenizer.encode(letter)
                     assert len(encoded_letter) == 1, "Each letter must be a single token"
-                    letter_to_id_cache[letter] = encoded_letter[0]
-                letter_ids.append(letter_to_id_cache[letter])
-            # focus logits just down to the answer position and the available letters of the answer
-            answer_pos = answer_time_positions[idx]
-            focus_logits = logits[idx, answer_pos, letter_ids]
-            # get the argmax letter (the predicted answer)
-            argmax_letter_id = focus_logits.argmax(dim=-1).item()
-            predicted_letter = letters[argmax_letter_id]
-            # evaluate the outcome
+                    letter_to_id_cache[letter] = encoded_letter
+                cand_tokens = letter_to_id_cache[letter]
+                if len(cand_tokens) != span_len:
+                    candidate_losses.append(float('inf'))
+                    continue
+                target_tensor = torch.tensor(cand_tokens, dtype=torch.long, device=device)
+                loss = F.cross_entropy(span_logits, target_tensor, reduction='mean')
+                candidate_losses.append(loss.item())
+            pred_idx = candidate_losses.index(min(candidate_losses))
+            predicted_letter = letters[pred_idx]
             outcome = task_object.evaluate(conversation, predicted_letter)
             num_passed += int(outcome)
             total += 1
@@ -157,8 +198,8 @@ def run_categorical_eval(task_object, tokenizer, model, batch_size, max_problems
 # -----------------------------------------------------------------------------
 
 def run_chat_eval(task_name, model, tokenizer, engine,
-                   batch_size=1, num_samples=1, max_new_tokens=512, temperature=0.0, top_k=50,
-                   max_problems=None):
+                   batch_size=1, num_samples=1, max_new_tokens=512, diffusion_steps=32, temperature=0.0, top_k=50,
+                   max_problems=None, mask_token_id=None):
     # Create the evaluation object
     task_module = {
         'HumanEval': HumanEval,
@@ -171,9 +212,9 @@ def run_chat_eval(task_name, model, tokenizer, engine,
     task_object = task_module()
     # Run the evaluation
     if task_object.eval_type == 'generative':
-        acc = run_generative_eval(task_object, tokenizer, model, engine, num_samples, max_new_tokens, temperature, top_k, max_problems=max_problems)
+        acc = run_generative_eval(task_object, tokenizer, model, engine, num_samples, max_new_tokens, diffusion_steps, temperature, top_k, max_problems=max_problems)
     elif task_object.eval_type == 'categorical':
-        acc = run_categorical_eval(task_object, tokenizer, model, batch_size, max_problems=max_problems)
+        acc = run_categorical_eval(task_object, tokenizer, model, batch_size, max_problems=max_problems, mask_token_id=mask_token_id)
     else:
         raise ValueError(f"Unsupported task evaluation type: {task_object.eval_type}")
     return acc
@@ -188,6 +229,7 @@ if __name__ == "__main__":
     parser.add_argument('-d', '--dtype', type=str, default='bfloat16', choices=['float32', 'bfloat16'])
     parser.add_argument('-t', '--temperature', type=float, default=0.0)
     parser.add_argument('-m', '--max-new-tokens', type=int, default=512)
+    parser.add_argument('--diffusion-steps', type=int, default=32)
     parser.add_argument('-n', '--num-samples', type=int, default=1)
     parser.add_argument('-k', '--top-k', type=int, default=50)
     parser.add_argument('-b', '--batch-size', type=int, default=8, help='Batch size for categorical evaluation')
@@ -203,6 +245,12 @@ if __name__ == "__main__":
     autocast_ctx = torch.amp.autocast(device_type=device_type, dtype=ptdtype) if device_type == "cuda" else nullcontext()
 
     model, tokenizer, meta = load_model(args.source, device, phase="eval", model_tag=args.model_tag, step=args.step)
+    try:
+        mask_token_id = tokenizer.encode_special("<|mask|>")
+        if mask_token_id is None or mask_token_id < 0:
+            mask_token_id = None
+    except Exception:
+        mask_token_id = None
     engine = Engine(model, tokenizer)
 
     # Get the tasks to evaluate on
@@ -227,9 +275,11 @@ if __name__ == "__main__":
                 batch_size=args.batch_size,
                 num_samples=args.num_samples,
                 max_new_tokens=args.max_new_tokens,
+                diffusion_steps=args.diffusion_steps,
                 temperature=args.temperature,
                 top_k=args.top_k,
                 max_problems=args.max_problems,
+                mask_token_id=mask_token_id,
             )
             results[task_name] = acc
             print0(f"{task_name} accuracy: {100 * acc:.2f}%")

@@ -18,6 +18,8 @@ parser.add_argument('-s', '--step', type=int, default=None, help='Step to load')
 parser.add_argument('-p', '--prompt', type=str, default='', help='Prompt the model, get a single response back')
 parser.add_argument('-t', '--temperature', type=float, default=0.6, help='Temperature for generation')
 parser.add_argument('-k', '--top-k', type=int, default=50, help='Top-k sampling parameter')
+parser.add_argument('--diffusion-steps', type=int, default=32, help='Number of diffusion steps during sampling')
+parser.add_argument('--response-length', type=int, default=256, help='Maximum assistant response length (in tokens)')
 parser.add_argument('--device-type', type=str, default='', choices=['cuda', 'cpu', 'mps'], help='Device type for evaluation: cuda|cpu|mps. empty => autodetect')
 parser.add_argument('-d', '--dtype', type=str, default='bfloat16', choices=['float32', 'bfloat16'])
 args = parser.parse_args()
@@ -81,7 +83,8 @@ while True:
     conversation_tokens.append(assistant_start)
     generate_kwargs = {
         "num_samples": 1,
-        "max_tokens": 256,
+        "response_length": args.response_length,
+        "diffusion_steps": args.diffusion_steps,
         "temperature": args.temperature,
         "top_k": args.top_k,
     }

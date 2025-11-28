@@ -48,21 +48,21 @@ You can also `cat report.md` file which appeared in the project directory and co
 - Tokens (approx): 83,497
 - Dependencies (uv.lock lines): 2,004
 
-| Metric          | BASE     | MID      | SFT      | RL       |
-|-----------------|----------|----------|----------|----------|
-| CORE            | 0.2219   | -        | -        | -        |
-| ARC-Challenge   | -        | 0.2875   | 0.2807   | -        |
-| ARC-Easy        | -        | 0.3561   | 0.3876   | -        |
-| GSM8K           | -        | 0.0250   | 0.0455   | 0.0758   |
-| HumanEval       | -        | 0.0671   | 0.0854   | -        |
-| MMLU            | -        | 0.3111   | 0.3151   | -        |
-| ChatCORE        | -        | 0.0730   | 0.0884   | -        |
+| Metric          | BASE     | MID      | SFT      |
+|-----------------|----------|----------|----------|
+| CORE            | 0.2219   | -        | -        |
+| ARC-Challenge   | -        | 0.2875   | 0.2807   |
+| ARC-Easy        | -        | 0.3561   | 0.3876   |
+| GSM8K           | -        | 0.0250   | 0.0455   |
+| HumanEval       | -        | 0.0671   | 0.0854   |
+| MMLU            | -        | 0.3111   | 0.3151   |
+| ChatCORE        | -        | 0.0730   | 0.0884   |
 
 Total wall clock time: 3h51m
 
 ---
 
-(Your table might be missing the RL number by default). For a lot more information around the speedrun script and what to look for and expect, please refer to the walkthrough that I posted in Discussions of the repo: ["Introducing nanochat: The best ChatGPT that $100 can buy"](https://github.com/karpathy/nanochat/discussions/1).
+(Your table might be missing some numbers by default). For a lot more information around the speedrun script and what to look for and expect, please refer to the walkthrough that I posted in Discussions of the repo: ["Introducing nanochat: The best ChatGPT that $100 can buy"](https://github.com/karpathy/nanochat/discussions/1).
 
 ## Bigger models
 
@@ -144,9 +144,9 @@ python -m pytest tests/test_rustbpe.py -v -s
 │   ├── core_eval.py                # Evaluates base model CORE score (DCLM paper)
 │   ├── dataloader.py               # Tokenizing Distributed Data Loader
 │   ├── dataset.py                  # Download/read utils for pretraining data
-│   ├── engine.py                   # Efficient model inference with KV Cache
+│   ├── engine.py                   # Diffusion sampler + chat utilities
 │   ├── execution.py                # Allows the LLM to execute Python code as tool
-│   ├── gpt.py                      # The GPT nn.Module Transformer
+│   ├── gpt.py                      # Diffusion Transformer mask predictor
 │   ├── logo.svg
 │   ├── loss_eval.py                # Evaluate bits per byte (instead of loss)
 │   ├── muon.py                     # Distributed Muon optimizer
@@ -167,7 +167,6 @@ python -m pytest tests/test_rustbpe.py -v -s
 │   ├── base_train.py               # Base model: train
 │   ├── chat_cli.py                 # Chat model (SFT/Mid): talk to over CLI
 │   ├── chat_eval.py                # Chat model (SFT/Mid): eval tasks
-│   ├── chat_rl.py                  # Chat model (SFT/Mid): reinforcement learning
 │   ├── chat_sft.py                 # Chat model: train SFT
 │   ├── chat_web.py                 # Chat model (SFT/Mid): talk to over WebUI
 │   ├── mid_train.py                # Chat model: midtraining
@@ -184,7 +183,6 @@ python -m pytest tests/test_rustbpe.py -v -s
 │   ├── smoltalk.py                 # Conglomerate dataset of SmolTalk from HF
 │   └── spellingbee.py              # Task teaching model to spell/count letters
 ├── tests
-│   └── test_engine.py
 │   └── test_rustbpe.py
 └── uv.lock
 ```

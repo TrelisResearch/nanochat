@@ -29,6 +29,7 @@ from tasks.gsm8k import GSM8K
 from tasks.smoltalk import SmolTalk
 from tasks.customjson import CustomJSON
 from tasks.spellingbee import SimpleSpelling, SpellingBee
+from nanochat.diffusion import sample_diffusion_mask, apply_diffusion_mask
 
 # -----------------------------------------------------------------------------
 # SFT Hyperparameters
@@ -74,6 +75,7 @@ wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(project="nanochat-sf
 
 # Load the model and tokenizer
 model, tokenizer, meta = load_model(source, device, phase="train", model_tag=model_tag, step=step)
+mask_token_id = tokenizer.encode_special("<|mask|>")
 orig_model = model # original, uncompiled model
 # model = torch.compile(model, dynamic=True) # doesn't work super well because of variable lengths of inputs
 engine = Engine(model, tokenizer) # will be used for inline model evaluation only
@@ -100,22 +102,18 @@ def sft_data_generator(dataset, batch_size):
     # prepares a list of tokenized conversations into a batch and yields
     def collate_and_yield(batch):
         nrows = len(batch)
-        ncols = max(len(ids) for ids, mask in batch) - 1 # seq of n creates inputs/targets of n-1
+        ncols = max(len(ids) for ids, mask in batch)
         inputs = torch.full((nrows, ncols), pad_token_id, dtype=torch.long)
-        targets = torch.full((nrows, ncols), -1, dtype=torch.long) # -1 is ignore index
+        eligible = torch.zeros((nrows, ncols), dtype=torch.bool)
         for i, (ids, mask) in enumerate(batch):
             n = len(ids)
             ids_tensor = torch.tensor(ids, dtype=torch.long)
-            inputs[i, :n-1] = ids_tensor[:-1]
-            # recall -1 is the ignore index, so mask out targets where mask is 0
-            row_targets = ids_tensor[1:]
-            # mask[1:] omits the mask for the BOS token, which is never a target atm so it's ok
-            mask_tensor = torch.tensor(mask[1:], dtype=torch.long)
-            row_targets[mask_tensor == 0] = -1 # mask out targets where mask is 0
-            targets[i, :n-1] = row_targets
+            inputs[i, :n] = ids_tensor
+            mask_tensor = torch.tensor(mask, dtype=torch.long)
+            eligible[i, :n] = mask_tensor.bool()
         inputs = inputs.to(device) # move to device
-        targets = targets.to(device)
-        return inputs, targets
+        eligible = eligible.to(device)
+        return inputs, eligible
     # iterates over the dataset in epochs, tokenizes
     batch = []
     while True:
@@ -177,9 +175,11 @@ for step in range(num_iterations):
         val_iter = iter(build_val_loader())
         losses = []
         for _ in range(eval_steps):
-            val_inputs, val_targets = next(val_iter)
+            val_inputs, val_eligible = next(val_iter)
+            loss_mask, seq_lens = sample_diffusion_mask(val_eligible)
+            corrupted = apply_diffusion_mask(val_inputs, loss_mask, mask_token_id)
             with torch.no_grad(), autocast_ctx:
-                loss = model(val_inputs, val_targets)
+                loss = model(corrupted, loss_mask=loss_mask, seq_lens=seq_lens, targets=val_inputs)
             losses.append(loss)
         val_loss = torch.stack(losses).mean() # average over eval_steps
         if ddp:
@@ -214,13 +214,15 @@ for step in range(num_iterations):
     # evaluate the gradient
     num_tokens = torch.tensor(0, device=device) # the number of "active" tokens of supervision seen
     for micro_step in range(grad_accum_steps):
-        train_inputs, train_targets = next(train_iter)
+        train_inputs, train_eligible = next(train_iter)
+        loss_mask, seq_lens = sample_diffusion_mask(train_eligible)
+        corrupted = apply_diffusion_mask(train_inputs, loss_mask, mask_token_id)
         with autocast_ctx:
-            loss = model(train_inputs, train_targets)
+            loss = model(corrupted, loss_mask=loss_mask, seq_lens=seq_lens, targets=train_inputs)
         train_loss = loss.detach() # for logging
         loss = loss / grad_accum_steps # each .backward() is a grad sum => normalize loss here
         loss.backward() # accumulate the gradient
-        num_tokens += (train_targets >= 0).sum()
+        num_tokens += train_eligible.sum()
     if ddp:
         dist.all_reduce(num_tokens, op=dist.ReduceOp.SUM) # sum over ranks
 

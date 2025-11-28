@@ -66,6 +66,7 @@ parser.add_argument('-i', '--source', type=str, default="sft", help="Source of t
 parser.add_argument('-t', '--temperature', type=float, default=0.8, help='Default temperature for generation')
 parser.add_argument('-k', '--top-k', type=int, default=50, help='Default top-k sampling parameter')
 parser.add_argument('-m', '--max-tokens', type=int, default=512, help='Default max tokens for generation')
+parser.add_argument('--diffusion-steps', type=int, default=32, help='Default number of diffusion steps during sampling')
 parser.add_argument('-g', '--model-tag', type=str, default=None, help='Model tag to load')
 parser.add_argument('-s', '--step', type=int, default=None, help='Step to load')
 parser.add_argument('-p', '--port', type=int, default=8000, help='Port to run the server on')
@@ -156,6 +157,7 @@ class ChatRequest(BaseModel):
     temperature: Optional[float] = None
     max_tokens: Optional[int] = None
     top_k: Optional[int] = None
+    diffusion_steps: Optional[int] = None
 
 def validate_chat_request(request: ChatRequest):
     """Validate chat request to prevent abuse."""
@@ -219,6 +221,8 @@ def validate_chat_request(request: ChatRequest):
                 status_code=400,
                 detail=f"max_tokens must be between {MIN_MAX_TOKENS} and {MAX_MAX_TOKENS}"
             )
+    if request.diffusion_steps is not None and request.diffusion_steps <= 0:
+        raise HTTPException(status_code=400, detail="diffusion_steps must be positive")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -264,11 +268,13 @@ async def generate_stream(
     tokens,
     temperature=None,
     max_new_tokens=None,
-    top_k=None
+    top_k=None,
+    diffusion_steps=None,
 ) -> AsyncGenerator[str, None]:
     """Generate assistant response with streaming."""
     temperature = temperature if temperature is not None else args.temperature
-    max_new_tokens = max_new_tokens if max_new_tokens is not None else args.max_tokens
+    response_length = max_new_tokens if max_new_tokens is not None else args.max_tokens
+    diffusion_steps = diffusion_steps if diffusion_steps is not None else args.diffusion_steps
     top_k = top_k if top_k is not None else args.top_k
 
     assistant_end = worker.tokenizer.encode_special("<|assistant_end|>")
@@ -283,7 +289,8 @@ async def generate_stream(
         for token_column, token_masks in worker.engine.generate(
             tokens,
             num_samples=1,
-            max_tokens=max_new_tokens,
+            response_length=response_length,
+            diffusion_steps=diffusion_steps,
             temperature=temperature,
             top_k=top_k,
             seed=random.randint(0, 2**31 - 1)
@@ -348,6 +355,9 @@ async def chat_completions(request: ChatRequest):
 
         conversation_tokens.append(assistant_start)
 
+        response_length = request.max_tokens if request.max_tokens is not None else args.max_tokens
+        diffusion_steps = request.diffusion_steps if request.diffusion_steps is not None else args.diffusion_steps
+
         # Streaming response with worker release after completion
         response_tokens = []
         async def stream_and_release():
@@ -356,8 +366,9 @@ async def chat_completions(request: ChatRequest):
                     worker,
                     conversation_tokens,
                     temperature=request.temperature,
-                    max_new_tokens=request.max_tokens,
-                    top_k=request.top_k
+                    max_new_tokens=response_length,
+                    top_k=request.top_k,
+                    diffusion_steps=diffusion_steps,
                 ):
                     # Accumulate response for logging
                     chunk_data = json.loads(chunk.replace("data: ", "").strip())
@@ -411,5 +422,5 @@ async def stats():
 if __name__ == "__main__":
     import uvicorn
     print(f"Starting NanoChat Web Server")
-    print(f"Temperature: {args.temperature}, Top-k: {args.top_k}, Max tokens: {args.max_tokens}")
+    print(f"Temperature: {args.temperature}, Top-k: {args.top_k}, Response length: {args.max_tokens}, Diffusion steps: {args.diffusion_steps}")
     uvicorn.run(app, host=args.host, port=args.port)

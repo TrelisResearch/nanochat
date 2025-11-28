@@ -45,7 +45,7 @@ def place_eval_bundle(file_path):
         shutil.move(extracted_bundle_dir, eval_bundle_dir)
     print0(f"Placed eval_bundle directory at {eval_bundle_dir}")
 
-def evaluate_model(model, tokenizer, device, max_per_task=-1):
+def evaluate_model(model, tokenizer, device, max_per_task=-1, mask_token_id=None):
     """
     Evaluate a base model on the CORE benchmark.
     - max_per_task: crop the data to this many examples per task for testing (-1 = disable)
@@ -99,7 +99,7 @@ def evaluate_model(model, tokenizer, device, max_per_task=-1):
             data = data[:max_per_task]
 
         # run the evaluation for this task
-        accuracy = evaluate_task(model, tokenizer, data, device, task_meta)
+        accuracy = evaluate_task(model, tokenizer, data, device, task_meta, mask_token_id=mask_token_id)
 
         results[label] = accuracy
         random_baseline = random_baselines[label]
@@ -157,6 +157,7 @@ def main():
     autocast_ctx = torch.amp.autocast(device_type=device_type, dtype=torch.bfloat16) if device_type == "cuda" else nullcontext()
 
     # Load model and tokenizer from command line or from file system
+    mask_token_id = None
     if args.hf_path is not None:
         # atm assume that if a path is given, it's a huggingface model path
         hf_path = args.hf_path
@@ -164,15 +165,17 @@ def main():
         model, tokenizer = load_hf_model(hf_path, device)
         model_name = hf_path # just for logging
         model_slug = hf_path.replace("/", "-") # for the output csv file
+        mask_token_id = get_mask_token_id(tokenizer)
     else:
         # load a local model from the file system
         model, tokenizer, meta = load_model("base", device, phase="eval")
         model_name = f"base_model (step {meta['step']})" # just for logging
         model_slug = f"base_model_{meta['step']:06d}" # for the output csv file
+        mask_token_id = get_mask_token_id(tokenizer)
 
     # Evaluate the model
     with autocast_ctx:
-        out = evaluate_model(model, tokenizer, device, max_per_task=args.max_per_task)
+        out = evaluate_model(model, tokenizer, device, max_per_task=args.max_per_task, mask_token_id=mask_token_id)
 
     # Write out the results to a csv file
     core_metric = None
@@ -210,3 +213,11 @@ def main():
 
 if __name__ == "__main__":
     main()
+def get_mask_token_id(tokenizer):
+    try:
+        mask_id = tokenizer.encode_special("<|mask|>")
+        if mask_id is None or mask_id < 0:
+            return None
+        return mask_id
+    except Exception:
+        return None

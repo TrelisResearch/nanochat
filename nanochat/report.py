@@ -201,8 +201,6 @@ EXPECTED_FILES = [
     "chat-evaluation-mid.md",
     "chat-sft.md",
     "chat-evaluation-sft.md",
-    "chat-rl.md",
-    "chat-evaluation-rl.md",
 ]
 # the metrics we're currently interested in
 chat_metrics = ["ARC-Easy", "ARC-Challenge", "MMLU", "GSM8K", "HumanEval", "ChatCORE"]
@@ -296,9 +294,7 @@ class Report:
                 with open(section_file, "r", encoding="utf-8") as in_file:
                     section = in_file.read()
                 # Extract timestamp from this section (the last section's timestamp will "stick" as end_time)
-                if "rl" not in file_name:
-                    # Skip RL sections for end_time calculation because RL is experimental
-                    end_time = extract_timestamp(section, "timestamp:")
+                end_time = extract_timestamp(section, "timestamp:")
                 # extract the most important metrics from the sections
                 if file_name == "base-model-evaluation.md":
                     final_metrics["base"] = extract(section, "CORE")
@@ -306,8 +302,6 @@ class Report:
                     final_metrics["mid"] = extract(section, chat_metrics)
                 if file_name == "chat-evaluation-sft.md":
                     final_metrics["sft"] = extract(section, chat_metrics)
-                if file_name == "chat-evaluation-rl.md":
-                    final_metrics["rl"] = extract(section, "GSM8K") # RL only evals GSM8K
                 # append this section of the report
                 out_file.write(section)
                 out_file.write("\n")
@@ -323,7 +317,7 @@ class Report:
             # Custom ordering: CORE first, ChatCORE last, rest in middle
             all_metrics = sorted(all_metrics, key=lambda x: (x != "CORE", x == "ChatCORE", x))
             # Fixed column widths
-            stages = ["base", "mid", "sft", "rl"]
+            stages = ["base", "mid", "sft"]
             metric_width = 15
             value_width = 8
             # Write table header

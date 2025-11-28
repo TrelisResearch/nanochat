@@ -4,9 +4,12 @@ A number of functions that help with evaluating a base model.
 import math
 import torch
 import torch.distributed as dist
+import torch.nn.functional as F
+
+from nanochat.diffusion import sample_diffusion_mask, apply_diffusion_mask
 
 @torch.no_grad()
-def evaluate_bpb(model, batches, steps, token_bytes):
+def evaluate_bpb(model, batches, steps, token_bytes, mask_token_id):
     """
     Instead of the naive 'mean loss', this function returns the bits per byte (bpb),
     which is a tokenization vocab size-independent metric, meaning you are still comparing
@@ -25,32 +28,30 @@ def evaluate_bpb(model, batches, steps, token_bytes):
     each token id, or 0 if the token is to not be counted (e.g. special tokens).
     """
     # record the losses
-    total_nats = torch.tensor(0.0, dtype=torch.float32, device=model.get_device())
-    total_bytes = torch.tensor(0, dtype=torch.int64, device=model.get_device())
+    device = model.get_device()
+    total_nats = torch.tensor(0.0, dtype=torch.float32, device=device)
+    total_bytes = torch.tensor(0.0, dtype=torch.float32, device=device)
     batch_iter = iter(batches)
+    token_bytes = token_bytes.to(device)
     for _ in range(steps):
-        x, y = next(batch_iter)
-        loss2d = model(x, y, loss_reduction='none') # (B, T)
-        loss2d = loss2d.view(-1) # flatten
-        y = y.view(-1) # flatten
-        if (y.int() < 0).any(): # mps does not currently have kernel for < 0 for int64, only int32
-            # slightly more complex code path if some target tokens are ignore_index (e.g. -1)
-            # any target token < 0 is to be ignored: do NOT index token_bytes with negatives
-            valid = y >= 0
-            y_safe = torch.where(valid, y, torch.zeros_like(y))
-            # map valid targets to their byte length; ignored targets contribute 0 bytes
-            num_bytes2d = torch.where(
-                valid,
-                token_bytes[y_safe],
-                torch.zeros_like(y, dtype=token_bytes.dtype)
-            )
-            total_nats += (loss2d * (num_bytes2d > 0)).sum()
-            total_bytes += num_bytes2d.sum()
-        else:
-            # fast path: no ignored targets, safe to index directly
-            num_bytes2d = token_bytes[y]
-            total_nats += (loss2d * (num_bytes2d > 0)).sum()
-            total_bytes += num_bytes2d.sum()
+        x, _ = next(batch_iter)
+        eligible_mask = torch.ones_like(x, dtype=torch.bool)
+        loss_mask, seq_lens = sample_diffusion_mask(eligible_mask)
+        mask_counts = loss_mask.sum(dim=1).clamp(min=1)
+        corrupted = apply_diffusion_mask(x, loss_mask, mask_token_id)
+        logits = model(corrupted)
+        ce = F.cross_entropy(
+            logits.view(-1, logits.size(-1)),
+            x.view(-1),
+            reduction='none'
+        ).view_as(x)
+        per_token_bytes = token_bytes[x]
+        masked_loss = ce * loss_mask
+        masked_bytes = per_token_bytes * loss_mask
+        scale = seq_lens / mask_counts.to(dtype=torch.float32)
+        total_nats += (masked_loss.sum(dim=1) * scale).sum()
+        scaled_bytes = masked_bytes.sum(dim=1).to(torch.float32) * scale
+        total_bytes += scaled_bytes.sum()
     # sum reduce across all ranks
     world_size = dist.get_world_size() if dist.is_initialized() else 1
     if world_size > 1:

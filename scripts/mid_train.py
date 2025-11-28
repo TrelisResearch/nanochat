@@ -21,6 +21,7 @@ from nanochat.tokenizer import get_token_bytes
 from nanochat.checkpoint_manager import save_checkpoint
 from nanochat.loss_eval import evaluate_bpb
 from nanochat.checkpoint_manager import load_model
+from nanochat.diffusion import sample_diffusion_mask, apply_diffusion_mask
 import torch.distributed as dist
 
 from tasks.common import TaskMixture
@@ -67,6 +68,7 @@ wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(project="nanochat-mi
 
 # Load the model and tokenizer
 model, tokenizer, meta = load_model("base", device, phase="train", model_tag=model_tag, step=step)
+mask_token_id = tokenizer.encode_special("<|mask|>")
 pretrain_batch_size = meta.get("device_batch_size", None)
 if pretrain_batch_size is not None and device_batch_size > pretrain_batch_size:
     print0(f"FOOTGUN WARNING: base model training used device_batch_size {pretrain_batch_size}, did you pass in a good --device_batch_size to this script?")
@@ -193,7 +195,7 @@ while True:
         val_loader = build_val_loader()
         eval_steps = eval_tokens // (device_batch_size * max_seq_len * ddp_world_size)
         with autocast_ctx:
-            val_bpb = evaluate_bpb(model, val_loader, eval_steps, token_bytes)
+            val_bpb = evaluate_bpb(model, val_loader, eval_steps, token_bytes, mask_token_id)
         print0(f"Step {step:05d} | Validation bpb: {val_bpb:.4f}")
         if val_bpb < min_val_bpb:
             min_val_bpb = val_bpb
@@ -238,8 +240,12 @@ while True:
     synchronize()
     t0 = time.time()
     for micro_step in range(grad_accum_steps):
+        tokens = x
+        eligible_mask = torch.ones_like(tokens, dtype=torch.bool)
+        loss_mask, seq_lens = sample_diffusion_mask(eligible_mask)
+        corrupted = apply_diffusion_mask(tokens, loss_mask, mask_token_id)
         with autocast_ctx:
-            loss = model(x, y)
+            loss = model(corrupted, loss_mask=loss_mask, seq_lens=seq_lens, targets=tokens)
         train_loss = loss.detach() # for logging
         loss = loss / grad_accum_steps # each .backward() is a grad sum => normalize loss here
         loss.backward()

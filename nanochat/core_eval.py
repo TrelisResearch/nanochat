@@ -142,30 +142,24 @@ def batch_sequences_lm(tokenizer, prompts):
 
 
 @torch.no_grad()
-def forward_model(model, input_ids):
+def forward_model(model, input_ids, targets):
     """
     Take BxT tensor of token ids, return BxT tensor of losses and argmax predictions.
-    The last column of losses is set to nan because we don't have autoregressive targets there.
     """
     batch_size, seq_len = input_ids.size()
     outputs = model(input_ids)
-    # Roll the tensor to the left by one position to get the (autoregressive) target ids
-    target_ids = torch.roll(input_ids, shifts=-1, dims=1)
-    # Calculate cross entropy at all positions
     losses = torch.nn.functional.cross_entropy(
         outputs.view(batch_size * seq_len, -1),
-        target_ids.view(batch_size * seq_len),
+        targets.view(batch_size * seq_len),
         reduction='none'
     ).view(batch_size, seq_len)
-    # Set the last column to be nan because there is no autoregressive loss there
-    losses[:, -1] = float('nan')
     # Get the argmax predictions at each position
     predictions = outputs.argmax(dim=-1)
     return losses, predictions
 
 
 @torch.no_grad()
-def evaluate_example(idx, model, tokenizer, data, device, task_meta):
+def evaluate_example(idx, model, tokenizer, data, device, task_meta, mask_token_id=None):
     """Evaluate a single example, return True if correct, False otherwise"""
     item = data[idx]
     task_type = task_meta['task_type']
@@ -214,24 +208,39 @@ def evaluate_example(idx, model, tokenizer, data, device, task_meta):
 
     # Stack up all the sequences into a batch
     pad_token_id = tokenizer.get_bos_token_id() # use BOS as pad token is ok
-    input_ids = stack_sequences(tokens, pad_token_id)
-    input_ids = input_ids.to(device)
-
-    # Forward the model, get the autoregressive loss and argmax prediction at each token
-    losses, predictions = forward_model(model, input_ids)
+    original_input_ids = stack_sequences(tokens, pad_token_id)
+    if mask_token_id is not None:
+        masked_sequences = []
+        for seq, si, ei in zip(tokens, start_idxs, end_idxs):
+            seq_masked = seq.copy()
+            start = max(si, 0)
+            end = max(ei, 0)
+            for pos in range(start, min(end, len(seq_masked))):
+                seq_masked[pos] = mask_token_id
+            masked_sequences.append(seq_masked)
+    else:
+        masked_sequences = tokens
+    original_input_ids = original_input_ids.to(device)
+    if mask_token_id is not None:
+        input_ids = stack_sequences(masked_sequences, pad_token_id).to(device)
+        losses, predictions = forward_model(model, input_ids, original_input_ids)
+    else:
+        input_ids = original_input_ids
+        targets = torch.roll(original_input_ids, shifts=-1, dims=1)
+        losses, predictions = forward_model(model, input_ids, targets)
+        losses[:, -1] = float('inf')
 
     # See if the losses/predictions come out correctly
     if task_type == 'language_modeling':
         # language modeling task is currently always batch size 1
         si = start_idxs[0]
         ei = end_idxs[0]
-        # predictions[i] predict input_ids[i+1] autoregressively
-        predicted_tokens = predictions[0, si-1:ei-1]
-        actual_tokens = input_ids[0, si:ei]
+        predicted_tokens = predictions[0, si:ei]
+        actual_tokens = original_input_ids[0, si:ei]
         is_correct = torch.all(predicted_tokens == actual_tokens).item()
     elif task_type in ['multiple_choice', 'schema']:
         # For MC/schema: find the option with lowest average loss
-        mean_losses = [losses[i, si-1:ei-1].mean().item()
+        mean_losses = [losses[i, si:ei].mean().item()
                         for i, (si, ei) in enumerate(zip(start_idxs, end_idxs))]
         pred_idx = mean_losses.index(min(mean_losses))
         is_correct = pred_idx == item['gold']
@@ -241,7 +250,7 @@ def evaluate_example(idx, model, tokenizer, data, device, task_meta):
     return is_correct
 
 
-def evaluate_task(model, tokenizer, data, device, task_meta):
+def evaluate_task(model, tokenizer, data, device, task_meta, mask_token_id=None):
     """
     This function is responsible for evaluating one task across many examples.
     It also handles dispatch to all processes if the script is run with torchrun.
@@ -251,7 +260,7 @@ def evaluate_task(model, tokenizer, data, device, task_meta):
     correct = torch.zeros(len(data), dtype=torch.float32, device=device)
     # stride the examples to each rank
     for idx in range(rank, len(data), world_size):
-        is_correct = evaluate_example(idx, model, tokenizer, data, device, task_meta)
+        is_correct = evaluate_example(idx, model, tokenizer, data, device, task_meta, mask_token_id=mask_token_id)
         correct[idx] = float(is_correct)
     # sync results across all the processes if running distributed
     if world_size > 1:
