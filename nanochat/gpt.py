@@ -31,6 +31,16 @@ class GPTConfig:
     n_head: int = 6 # number of query heads
     n_kv_head: int = 6 # number of key/value heads (GQA)
     n_embd: int = 768
+    # Recursive transformer config
+    n_prelude: int = 2  # number of prelude layers
+    n_recur_block: int = 4  # number of layers in the recurrent block
+    n_coda: int = 2  # number of coda layers
+    train_recur_mean: float = 4.0  # mean recurrences during training (also default r at inference)
+    train_recur_max: int = 16  # max recurrences sampled during training
+    recur_warm_start: bool = True  # warm-start recurrence from previous token's final state
+    bptt_k: int = 4  # truncate backprop to last k recurrences (None = full backprop)
+    kv_cache_recur_budget: int = 1  # KV cache slots per position for recurrence (1 = only store final)
+    inject_mode: str = "concat_linear"  # input injection mode: "concat_linear" (learned adapter)
 
 
 def norm(x):
@@ -139,10 +149,20 @@ class GPT(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.config = config
+        # Validate recursive config: prelude + recur + coda <= n_layer
+        assert config.n_prelude + config.n_recur_block + config.n_coda <= config.n_layer, \
+            f"n_prelude({config.n_prelude}) + n_recur_block({config.n_recur_block}) + n_coda({config.n_coda}) must be <= n_layer({config.n_layer})"
+
+        # Recursive transformer structure: prelude -> recur (repeated r times) -> coda
+        # Layer indices: prelude [0, n_prelude), recur [n_prelude, n_prelude+n_recur_block), coda uses indices after recur
         self.transformer = nn.ModuleDict({
             "wte": nn.Embedding(config.vocab_size, config.n_embd),
-            "h": nn.ModuleList([Block(config, layer_idx) for layer_idx in range(config.n_layer)]),
+            "prelude": nn.ModuleList([Block(config, layer_idx) for layer_idx in range(config.n_prelude)]),
+            "recur": nn.ModuleList([Block(config, config.n_prelude + layer_idx) for layer_idx in range(config.n_recur_block)]),
+            "coda": nn.ModuleList([Block(config, config.n_prelude + config.n_recur_block + layer_idx) for layer_idx in range(config.n_coda)]),
         })
+        # Input injection adapter: concat(e, s) -> linear -> u
+        self.inject = nn.Linear(2 * config.n_embd, config.n_embd, bias=False)
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
         # To support meta device initialization, we init the rotary embeddings here, but it's fake
         # As for rotary_seq_len, these rotary embeddings are pretty small/cheap in memory,
@@ -158,10 +178,13 @@ class GPT(nn.Module):
         self.apply(self._init_weights)
         # zero out classifier weights
         torch.nn.init.zeros_(self.lm_head.weight)
-        # zero out c_proj weights in all blocks
-        for block in self.transformer.h:
+        # zero out c_proj weights in all blocks (prelude, recur, coda)
+        all_blocks = list(self.transformer.prelude) + list(self.transformer.recur) + list(self.transformer.coda)
+        for block in all_blocks:
             torch.nn.init.zeros_(block.mlp.c_proj.weight)
             torch.nn.init.zeros_(block.attn.c_proj.weight)
+        # zero out inject layer (so initial recurrence is identity-like)
+        torch.nn.init.zeros_(self.inject.weight)
         # init the rotary embeddings
         head_dim = self.config.n_embd // self.config.n_head
         cos, sin = self._precompute_rotary_embeddings(self.rotary_seq_len, head_dim)
@@ -213,8 +236,13 @@ class GPT(nn.Module):
     def setup_optimizers(self, unembedding_lr=0.004, embedding_lr=0.2, matrix_lr=0.02, weight_decay=0.0):
         model_dim = self.config.n_embd
         ddp, rank, local_rank, world_size = get_dist_info()
-        # Separate out all parameters into 3 groups (matrix, embedding, lm_head)
-        matrix_params = list(self.transformer.h.parameters())
+        # Separate out all parameters into groups (matrix params from blocks + inject, embedding, lm_head)
+        matrix_params = (
+            list(self.transformer.prelude.parameters()) +
+            list(self.transformer.recur.parameters()) +
+            list(self.transformer.coda.parameters()) +
+            list(self.inject.parameters())
+        )
         embedding_params = list(self.transformer.wte.parameters())
         lm_head_params = list(self.lm_head.parameters())
         assert len(list(self.parameters())) == len(matrix_params) + len(embedding_params) + len(lm_head_params)
@@ -241,8 +269,25 @@ class GPT(nn.Module):
                 group["initial_lr"] = group["lr"]
         return optimizers
 
-    def forward(self, idx, targets=None, kv_cache=None, loss_reduction='mean'):
+    def forward(self, idx, targets=None, kv_cache=None, loss_reduction='mean', num_recur=None, warm_start_state=None):
+        """
+        Forward pass with recursive transformer structure.
+
+        Args:
+            idx: Input token indices (B, T)
+            targets: Target token indices for loss computation (B, T) or None for inference
+            kv_cache: KV cache for inference (RecursiveKVCache or None)
+            loss_reduction: Loss reduction mode ('mean' or 'none')
+            num_recur: Number of recurrences (defaults to train_recur_mean)
+            warm_start_state: Optional warm-start state from previous forward pass (B, T, n_embd)
+
+        Returns:
+            If targets is not None: loss
+            Else: (logits, final_recur_state) where final_recur_state can be used for warm-start
+        """
         B, T = idx.size()
+        if num_recur is None:
+            num_recur = int(self.config.train_recur_mean)
 
         # Grab the rotary embeddings for the current sequence length (they are of shape (1, seq_len, 1, head_dim/2))
         assert T <= self.cos.size(1), f"Sequence length grew beyond the rotary embeddings cache: {T} > {self.cos.size(1)}"
@@ -252,10 +297,46 @@ class GPT(nn.Module):
         T0 = 0 if kv_cache is None else kv_cache.get_pos()
         cos_sin = self.cos[:, T0:T0+T], self.sin[:, T0:T0+T] # truncate cache to current sequence length
 
-        # Forward the trunk of the Transformer
+        # 1. Embedding + norm
         x = self.transformer.wte(idx)
         x = norm(x)
-        for block in self.transformer.h:
+
+        # 2. Prelude blocks (run once)
+        # For inference with KV cache, prelude uses cache_write=True
+        for block in self.transformer.prelude:
+            x = block(x, cos_sin, kv_cache)
+        e = x  # prelude output, used for injection into each recurrence
+
+        # 3. Initialize recurrent state
+        # If warm_start_state provided and config allows, use it; otherwise start from e
+        if warm_start_state is not None and self.config.recur_warm_start:
+            # warm_start_state may be (B, 1, h) from last token - broadcast to match e's shape (B, T, h)
+            if warm_start_state.size(1) != T:
+                s = warm_start_state.expand(-1, T, -1)
+            else:
+                s = warm_start_state
+        else:
+            s = e
+
+        # 4. Recurrent block (run num_recur times)
+        # All recurrences read/write to KV cache. Since cache position only advances after
+        # the last layer (coda), recur layers overwrite the same slot each iteration.
+        # Only the final recurrence's write persists (paper Section 6.2: ring buffer with budget=1).
+        for i in range(num_recur):
+            # Input injection: u = inject(concat(e, s))
+            u = self.inject(torch.cat([e, s], dim=-1))
+            # Run recur blocks with KV cache (all recurrences can attend to previous tokens)
+            for block in self.transformer.recur:
+                u = block(u, cos_sin, kv_cache)
+            s = u  # update recurrent state
+            # Truncated BPTT: detach gradients for recurrences before the last bptt_k
+            # This limits gradient flow depth to bptt_k * n_recur_block layers through recurrence
+            if self.config.bptt_k is not None and i < num_recur - self.config.bptt_k:
+                s = s.detach()
+
+        # 5. Coda blocks (run once)
+        x = s
+        for block in self.transformer.coda:
             x = block(x, cos_sin, kv_cache)
         x = norm(x)
 
@@ -263,20 +344,19 @@ class GPT(nn.Module):
         softcap = 15
         if targets is not None:
             # training mode: compute and return the loss
-            # TODO: experiment with Liger Kernels / chunked cross-entropy etc.
             logits = self.lm_head(x)
             logits = softcap * torch.tanh(logits / softcap) # logits softcap
             logits = logits.float() # use tf32/fp32 for logits
             loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1, reduction=loss_reduction)
             return loss
         else:
-            # inference mode: compute and return the logits
+            # inference mode: compute and return the logits + final recurrent state for warm-start
             logits = self.lm_head(x)
             logits = softcap * torch.tanh(logits / softcap) # logits softcap
-            return logits
+            return logits, s
 
     @torch.inference_mode()
-    def generate(self, tokens, max_tokens, temperature=1.0, top_k=None, seed=42):
+    def generate(self, tokens, max_tokens, temperature=1.0, top_k=None, seed=42, num_recur=None):
         """
         Naive autoregressive streaming inference.
         To make it super simple, let's assume:
@@ -290,8 +370,11 @@ class GPT(nn.Module):
             rng = torch.Generator(device=device)
             rng.manual_seed(seed)
         ids = torch.tensor([tokens], dtype=torch.long, device=device) # add batch dim
+        warm_start_state = None
         for _ in range(max_tokens):
-            logits = self.forward(ids) # (B, T, vocab_size)
+            logits, warm_start_state = self.forward(ids, num_recur=num_recur, warm_start_state=warm_start_state) # (B, T, vocab_size)
+            # Only keep last position's state for warm-start (shape B,1,h)
+            warm_start_state = warm_start_state[:, -1:, :]
             logits = logits[:, -1, :] # (B, vocab_size)
             if top_k is not None:
                 v, _ = torch.topk(logits, min(top_k, logits.size(-1)))

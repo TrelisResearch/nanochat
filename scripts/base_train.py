@@ -14,10 +14,12 @@ python -m scripts.base_train --depth=4 --max_seq_len=512 --device_batch_size=1 -
 import os
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 import time
+import math
 from contextlib import nullcontext
 
 import wandb
 import torch
+import numpy as np
 
 from nanochat.gpt import GPT, GPTConfig
 from nanochat.dataloader import tokenizing_distributed_data_loader, tokenizing_distributed_data_loader_with_state
@@ -37,6 +39,13 @@ device_type = "" # cuda|cpu|mps (empty => autodetect good device type default, i
 # Model architecture
 depth = 20 # the depth of the Transformer model to train, rest of the kwargs are derived
 max_seq_len = 2048 # max context length
+# Recursive transformer config
+n_prelude = 2 # number of prelude layers
+n_recur_block = 4 # number of layers in the recurrent block
+n_coda = 2 # number of coda layers
+train_recur_mean = 4.0 # mean recurrences during training (also default r at inference); r=4 gives 20 effective layers
+train_recur_max = 16 # max recurrences sampled during training
+bptt_k = 4 # truncate backprop to last k recurrences (limits gradient depth)
 # Training horizon. Only one of these 3 will be used, in this order of precedence.
 num_iterations = -1 # explicit number of steps of the optimization (-1 = disable)
 target_flops = -1.0 # calculate num_iterations to reach target_flops. Useful for scaling laws experiments (-1 = disable)
@@ -95,6 +104,7 @@ print0(f"num_layers: {num_layers}")
 print0(f"model_dim: {model_dim}")
 print0(f"num_heads: {num_heads}")
 print0(f"num_kv_heads: {num_kv_heads}")
+print0(f"Recursive config: prelude={n_prelude}, recur={n_recur_block}, coda={n_coda}, train_recur_mean={train_recur_mean}, train_recur_max={train_recur_max}, bptt_k={bptt_k}")
 
 # Optimizer / data / training length related hyperparameters
 # figure out the needed gradient accumulation to reach the desired total batch size
@@ -110,7 +120,13 @@ print0(f"Total batch size {total_batch_size:,} => gradient accumulation steps: {
 # Initialize the Model
 
 # Create a new model with random weights
-model_config_kwargs = dict(sequence_len=max_seq_len, vocab_size=vocab_size, n_layer=num_layers, n_head=num_heads, n_kv_head=num_kv_heads, n_embd=model_dim)
+model_config_kwargs = dict(
+    sequence_len=max_seq_len, vocab_size=vocab_size, n_layer=num_layers,
+    n_head=num_heads, n_kv_head=num_kv_heads, n_embd=model_dim,
+    # Recursive transformer config
+    n_prelude=n_prelude, n_recur_block=n_recur_block, n_coda=n_coda,
+    train_recur_mean=train_recur_mean, train_recur_max=train_recur_max, bptt_k=bptt_k,
+)
 with torch.device("meta"):
     model_config = GPTConfig(**model_config_kwargs)
     model = GPT(model_config)
@@ -304,8 +320,15 @@ while True:
     synchronize()
     t0 = time.time()
     for micro_step in range(grad_accum_steps):
+        # Sample number of recurrences from Poisson log-normal distribution (per paper Section 3.3)
+        # τ ~ N(log(r̄) - ½σ², σ) where σ=0.5, then r ~ Poisson(e^τ) + 1
+        sigma = 0.5
+        r_bar = model_config.train_recur_mean
+        tau = np.random.normal(math.log(r_bar) - 0.5 * sigma**2, sigma)
+        num_recur = np.random.poisson(math.exp(tau)) + 1
+        num_recur = max(1, min(num_recur, model_config.train_recur_max))  # clamp to [1, max]
         with autocast_ctx:
-            loss = model(x, y)
+            loss = model(x, y, num_recur=num_recur)
         train_loss = loss.detach() # for logging
         loss = loss / grad_accum_steps # each .backward() is a grad sum => normalize loss here
         loss.backward()

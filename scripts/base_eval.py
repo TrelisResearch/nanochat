@@ -45,10 +45,11 @@ def place_eval_bundle(file_path):
         shutil.move(extracted_bundle_dir, eval_bundle_dir)
     print0(f"Placed eval_bundle directory at {eval_bundle_dir}")
 
-def evaluate_model(model, tokenizer, device, max_per_task=-1):
+def evaluate_model(model, tokenizer, device, max_per_task=-1, num_recur=None):
     """
     Evaluate a base model on the CORE benchmark.
     - max_per_task: crop the data to this many examples per task for testing (-1 = disable)
+    - num_recur: number of recurrences for recursive transformer (None = use model default)
     """
     # Load config and task metadata
     base_dir = get_base_dir()
@@ -71,6 +72,9 @@ def evaluate_model(model, tokenizer, device, max_per_task=-1):
             task_name = row['Eval Task']
             random_baseline = row['Random baseline']
             random_baselines[task_name] = float(random_baseline)
+
+    recur_str = f" (r={num_recur})" if num_recur is not None else ""
+    print0(f"Evaluating with{recur_str}...")
 
     # Evaluate each task
     results = {}
@@ -99,7 +103,7 @@ def evaluate_model(model, tokenizer, device, max_per_task=-1):
             data = data[:max_per_task]
 
         # run the evaluation for this task
-        accuracy = evaluate_task(model, tokenizer, data, device, task_meta)
+        accuracy = evaluate_task(model, tokenizer, data, device, task_meta, num_recur=num_recur)
 
         results[label] = accuracy
         random_baseline = random_baselines[label]
@@ -149,7 +153,14 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--hf-path', type=str, default=None, help='HuggingFace model path to evaluate')
     parser.add_argument('--max-per-task', type=int, default=-1, help='Max examples per task to evaluate (-1 = disable)')
+    parser.add_argument('--num-recur', type=str, default=None,
+                        help='Number of recurrences for recursive transformer. Can be single value (e.g. "2") or comma-separated list (e.g. "2,4,8") to evaluate multiple.')
     args = parser.parse_args()
+
+    # Parse num_recur argument - can be single value or comma-separated list
+    recur_values = None
+    if args.num_recur is not None:
+        recur_values = [int(x.strip()) for x in args.num_recur.split(',')]
 
     # distributed / precision setup
     device_type = autodetect_device_type()
@@ -170,40 +181,63 @@ def main():
         model_name = f"base_model (step {meta['step']})" # just for logging
         model_slug = f"base_model_{meta['step']:06d}" # for the output csv file
 
-    # Evaluate the model
-    with autocast_ctx:
-        out = evaluate_model(model, tokenizer, device, max_per_task=args.max_per_task)
+    # Evaluate the model - possibly multiple times with different recursion counts
+    all_results = {}
+    if recur_values is None:
+        # Default: evaluate once with model's default recursion count
+        recur_values = [None]
 
-    # Write out the results to a csv file
-    core_metric = None
-    centered_results = {}
+    for num_recur in recur_values:
+        recur_label = f"r{num_recur}" if num_recur is not None else "default"
+        print0(f"\n{'='*80}")
+        print0(f"Evaluating with num_recur={num_recur if num_recur is not None else 'default'}")
+        print0(f"{'='*80}")
+
+        with autocast_ctx:
+            out = evaluate_model(model, tokenizer, device, max_per_task=args.max_per_task, num_recur=num_recur)
+        all_results[recur_label] = out
+
+    # Write out the results to csv files
     if ddp_rank == 0:
         base_dir = get_base_dir()
-        output_csv_path = os.path.join(base_dir, "base_eval", f"{model_slug}.csv")
-        os.makedirs(os.path.dirname(output_csv_path), exist_ok=True)
-        results = out["results"]
-        centered_results = out["centered_results"]
-        core_metric = out["core_metric"]
-        with open(output_csv_path, 'w', encoding='utf-8', newline='') as f:
-            f.write(f"{'Task':<35}, {'Accuracy':<10}, {'Centered':<10}\n")
-            for label in results:
-                f.write(f"{label:<35}, {results[label]:<10.6f}, {centered_results[label]:<10.6f}\n")
-            f.write(f"{'CORE':<35}, {'':<10}, {core_metric:<10.6f}\n")
-        # Print the content of the csv file to console too
-        print0("="*80)
-        print0(f"Model: {model_name}")
-        print0("="*80)
-        with open(output_csv_path, 'r', encoding='utf-8') as f:
-            print0(f.read())
 
-    # Log to report
+        for recur_label, out in all_results.items():
+            suffix = f"_{recur_label}" if recur_label != "default" else ""
+            output_csv_path = os.path.join(base_dir, "base_eval", f"{model_slug}{suffix}.csv")
+            os.makedirs(os.path.dirname(output_csv_path), exist_ok=True)
+            results = out["results"]
+            centered_results = out["centered_results"]
+            core_metric = out["core_metric"]
+            with open(output_csv_path, 'w', encoding='utf-8', newline='') as f:
+                f.write(f"{'Task':<35}, {'Accuracy':<10}, {'Centered':<10}\n")
+                for label in results:
+                    f.write(f"{label:<35}, {results[label]:<10.6f}, {centered_results[label]:<10.6f}\n")
+                f.write(f"{'CORE':<35}, {'':<10}, {core_metric:<10.6f}\n")
+            # Print the content of the csv file to console too
+            print0("="*80)
+            print0(f"Model: {model_name} ({recur_label})")
+            print0("="*80)
+            with open(output_csv_path, 'r', encoding='utf-8') as f:
+                print0(f.read())
+
+        # Summary comparison if multiple recursion counts were evaluated
+        if len(all_results) > 1:
+            print0("\n" + "="*80)
+            print0("SUMMARY: CORE metric by recursion count")
+            print0("="*80)
+            for recur_label, out in all_results.items():
+                print0(f"  {recur_label}: {out['core_metric']:.4f}")
+
+    # Log to report (use last result for backwards compatibility)
     from nanochat.report import get_report
+    last_out = list(all_results.values())[-1]
     get_report().log(section="Base model evaluation", data=[
         {
             "Model": model_name,
-            "CORE metric": core_metric,
+            "CORE metric": last_out["core_metric"],
+            "Recursion counts evaluated": list(all_results.keys()),
         },
-        centered_results, # the full table
+        {f"{k}_core": v["core_metric"] for k, v in all_results.items()},  # summary of all
     ])
 
     compute_cleanup()

@@ -142,13 +142,16 @@ def batch_sequences_lm(tokenizer, prompts):
 
 
 @torch.no_grad()
-def forward_model(model, input_ids):
+def forward_model(model, input_ids, num_recur=None):
     """
     Take BxT tensor of token ids, return BxT tensor of losses and argmax predictions.
     The last column of losses is set to nan because we don't have autoregressive targets there.
     """
     batch_size, seq_len = input_ids.size()
-    outputs = model(input_ids)
+    outputs = model(input_ids, num_recur=num_recur) if num_recur is not None else model(input_ids)
+    # Handle recursive transformer that returns (logits, state) tuple
+    if isinstance(outputs, tuple):
+        outputs = outputs[0]  # take just the logits
     # Roll the tensor to the left by one position to get the (autoregressive) target ids
     target_ids = torch.roll(input_ids, shifts=-1, dims=1)
     # Calculate cross entropy at all positions
@@ -165,7 +168,7 @@ def forward_model(model, input_ids):
 
 
 @torch.no_grad()
-def evaluate_example(idx, model, tokenizer, data, device, task_meta):
+def evaluate_example(idx, model, tokenizer, data, device, task_meta, num_recur=None):
     """Evaluate a single example, return True if correct, False otherwise"""
     item = data[idx]
     task_type = task_meta['task_type']
@@ -218,7 +221,7 @@ def evaluate_example(idx, model, tokenizer, data, device, task_meta):
     input_ids = input_ids.to(device)
 
     # Forward the model, get the autoregressive loss and argmax prediction at each token
-    losses, predictions = forward_model(model, input_ids)
+    losses, predictions = forward_model(model, input_ids, num_recur=num_recur)
 
     # See if the losses/predictions come out correctly
     if task_type == 'language_modeling':
@@ -241,7 +244,7 @@ def evaluate_example(idx, model, tokenizer, data, device, task_meta):
     return is_correct
 
 
-def evaluate_task(model, tokenizer, data, device, task_meta):
+def evaluate_task(model, tokenizer, data, device, task_meta, num_recur=None):
     """
     This function is responsible for evaluating one task across many examples.
     It also handles dispatch to all processes if the script is run with torchrun.
@@ -251,7 +254,7 @@ def evaluate_task(model, tokenizer, data, device, task_meta):
     correct = torch.zeros(len(data), dtype=torch.float32, device=device)
     # stride the examples to each rank
     for idx in range(rank, len(data), world_size):
-        is_correct = evaluate_example(idx, model, tokenizer, data, device, task_meta)
+        is_correct = evaluate_example(idx, model, tokenizer, data, device, task_meta, num_recur=num_recur)
         correct[idx] = float(is_correct)
     # sync results across all the processes if running distributed
     if world_size > 1:

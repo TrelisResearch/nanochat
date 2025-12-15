@@ -23,6 +23,27 @@ screen -L -Logfile speedrun.log -S speedrun bash speedrun.sh
 Note that:
 - passing `WANDB_RUN` will set the name for the run and start logging to WANDB, which will use your WANDB_API_KEY if set in env OR prompt for login during startup
 
+### Recursive Transformer (experimental)
+The `recursive` branch implements a recursive transformer architecture where the model is split into prelude → recur (repeated r times) → coda blocks. During training, r is sampled from a Poisson log-normal distribution centered around `train_recur_mean` (default 4.0). During eval, you can test different recursion depths.
+
+Note: The recursive config creates `n_prelude + n_recur_block + n_coda` unique layer weights (default: 8). Effective depth per forward pass is `n_prelude + r × n_recur_block + n_coda`. Default r=4 gives 20 effective layers, matching the original depth=20.
+
+**Test the implementation:**
+```bash
+uv run python -m scripts.test_recursive  # requires CUDA
+```
+
+**Train with recursive architecture** (uses same wandb project for comparison):
+```bash
+# Default: n_prelude=2, n_recur_block=4, n_coda=2, train_recur_max=16
+torchrun --standalone --nproc_per_node=8 -m scripts.base_train
+```
+
+**Evaluate with different recursion counts:**
+```bash
+uv run python -m scripts.base_eval --num-recur=2,4,8,16
+```
+
 ### Resuming or continuing after an interruption
 Reuse your original session, if still running, with `screen -r speedrun`, or start a new session by re-running the whole run commands above, optionally commenting out lines in `speedrun.sh` that you do not wish to re-run.
 
@@ -243,6 +264,7 @@ python -m pytest tests/test_rustbpe.py -v -s
 │   ├── chat_sft.py                 # Chat model: train SFT
 │   ├── chat_web.py                 # Chat model (SFT/Mid): talk to over WebUI
 │   ├── mid_train.py                # Chat model: midtraining
+│   ├── test_recursive.py           # Test recursive transformer (CUDA)
 │   ├── tok_eval.py                 # Tokenizer: evaluate compression rate
 │   └── tok_train.py                # Tokenizer: train it
 ├── speedrun.sh                     # Train the ~$100 nanochat d20
