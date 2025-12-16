@@ -43,6 +43,7 @@ We need to inject prelude output `e` into each recurrence step while evolving re
 
 Add module:
 - `self.inject = Linear(2*h -> h, bias=False)`  (h = n_embd)
+- **Initialization**: identity-like `[I | 0]` so `inject(concat(e,s)) = e` initially. This ensures gradients flow (unlike zero-init which kills gradients since inject has no residual bypass).
 
 Forward step:
 - compute once: `e = prelude(embed(x))` (shape [B,T,h])
@@ -170,7 +171,7 @@ return logits, s  # return state for warm-start
 - train_recur_mean = 4.0 → effective depth 20 (matches original depth=20)
 - train_recur_max = 16
 - bptt_k = 4 → gradient flows through max 16 recur layers
-- inject_mode = "concat_linear" (learned adapter, zero-initialized)
+- inject_mode = "concat_linear" (learned adapter, identity-initialized: passes through e initially)
 - recur_warm_start = True
 - kv_cache_recur_budget = 1 (cache only final recurrence)
 - Sampling: Poisson log-normal distribution (σ=0.5)

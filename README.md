@@ -18,6 +18,7 @@ export WANDB_RUN=d20
 screen -L -Logfile speedrun.log -S speedrun bash speedrun.sh
 ```
 - To safely detach from the session press: Ctrl+A then D (that's Ctrl+A, release, then press D).
+- To reattach use: `screen -r speedrun`
 - To see the logs use `tail -f speedrun.log`.
 
 Note that:

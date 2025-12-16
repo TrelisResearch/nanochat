@@ -15,7 +15,7 @@ See [https://github.com/TrelisResearch/nanochat]() for details on how to downloa
 - train_recur_mean = 4.0 → effective depth 20 (matches original depth=20) # 2 + 4*4 + 2 = 20
 - train_recur_max = 16 # Number of recurrences during training are sampled from a Poisson log-normal distribution (σ=0.5) with a mean of train_recur_mean = 4.0
 - bptt_k = 4 → gradient flows through max 16 recur layers # So that the mean case has full back prop but higher level of recurrence are truncated
-- inject_mode = "concat_linear" (learned adapter, zero-initialized) # the recycle stream is concatenated with inputs and passed through a shrinking linear layer
+- inject_mode = "concat_linear" (learned adapter, identity-initialized) # the recycle stream is concatenated with inputs and passed through a shrinking linear layer; identity-init ensures gradients flow
 - recur_warm_start = True # the recycle stream is zero initialised for the first token generated, but the next token borrows the last state from the previous token, accelerating inference
 - kv_cache_recur_budget = 1 (cache only final recurrence) # the final recurrence state is always used for later tokens, saving memory and assisting accuracy
 - Sampling: Poisson log-normal distribution (σ=0.5)

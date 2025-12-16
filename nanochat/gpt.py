@@ -183,8 +183,13 @@ class GPT(nn.Module):
         for block in all_blocks:
             torch.nn.init.zeros_(block.mlp.c_proj.weight)
             torch.nn.init.zeros_(block.attn.c_proj.weight)
-        # zero out inject layer (so initial recurrence is identity-like)
-        torch.nn.init.zeros_(self.inject.weight)
+        # Initialize inject layer as identity-like: output = e (first half of concat(e, s))
+        # This ensures gradients flow on the first forward pass
+        # Weight shape is (n_embd, 2*n_embd), we want [I | 0] so inject(concat(e,s)) ≈ e
+        n_embd = self.config.n_embd
+        with torch.no_grad():
+            self.inject.weight.zero_()
+            self.inject.weight[:, :n_embd].copy_(torch.eye(n_embd))
         # init the rotary embeddings
         head_dim = self.config.n_embd // self.config.n_head
         cos, sin = self._precompute_rotary_embeddings(self.rotary_seq_len, head_dim)
