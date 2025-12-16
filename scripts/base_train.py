@@ -148,6 +148,9 @@ orig_model = model # original, uncompiled model, for saving raw model state_dict
 # Use dynamic=True for recursive models where num_recur varies per batch
 # This prevents recompilation OOM from Poisson-sampled num_recur values
 is_recursive = model_config.n_recur_block > 0
+# Increase cache size to prevent recompilation OOM when switching train/eval modes
+# Default is 8, which fills up from num_recur variants + train/eval toggles
+torch._dynamo.config.cache_size_limit = 64
 model = torch.compile(model, dynamic=is_recursive)
 num_params = sum(p.numel() for p in model.parameters())
 print0(f"Number of parameters: {num_params:,}")

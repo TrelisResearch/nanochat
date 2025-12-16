@@ -84,7 +84,7 @@ DATASET_DOWNLOAD_PID=$!
 
 # Train tokenizer only if not already trained
 TOKENIZER_DIR="$NANOCHAT_BASE_DIR/tokenizer"
-if [ -d "$TOKENIZER_DIR" ] && [ -f "$TOKENIZER_DIR/tokenizer.json" ]; then
+if [ -d "$TOKENIZER_DIR" ] && [ -f "$TOKENIZER_DIR/tokenizer.pkl" ]; then
     echo "Tokenizer already exists at $TOKENIZER_DIR, skipping training..."
 else
     # train the tokenizer with vocab size 2**16 = 65536 on ~2B characters of data

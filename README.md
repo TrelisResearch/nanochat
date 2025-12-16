@@ -27,6 +27,10 @@ Note that:
 ### Recursive Transformer (experimental)
 The `recursive` branch implements a recursive transformer architecture where the model is split into prelude → recur (repeated r times) → coda blocks. During training, r is sampled from a Poisson log-normal distribution centered around `train_recur_mean` (default 4.0).
 
+Todo:
+[ ] Reflect on whether LR should be lower or not.
+[ ] Review all changes done over recursive.
+
 **Architecture:**
 - `n_prelude=2` + `n_recur_block=4` + `n_coda=2` = 8 unique layer weights
 - Effective depth = `n_prelude + r × n_recur_block + n_coda` = 2 + 4×4 + 2 = 20 (with r=4)

@@ -71,6 +71,8 @@ pretrain_batch_size = meta.get("device_batch_size", None)
 if pretrain_batch_size is not None and device_batch_size > pretrain_batch_size:
     print0(f"FOOTGUN WARNING: base model training used device_batch_size {pretrain_batch_size}, did you pass in a good --device_batch_size to this script?")
 orig_model = model
+# Increase cache size to prevent recompilation OOM when switching train/eval modes
+torch._dynamo.config.cache_size_limit = 64
 model = torch.compile(model, dynamic=False)
 depth = model.config.n_layer
 num_flops_per_token = model.estimate_flops()
