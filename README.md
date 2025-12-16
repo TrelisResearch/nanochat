@@ -24,25 +24,29 @@ Note that:
 - passing `WANDB_RUN` will set the name for the run and start logging to WANDB, which will use your WANDB_API_KEY if set in env OR prompt for login during startup
 
 ### Recursive Transformer (experimental)
-The `recursive` branch implements a recursive transformer architecture where the model is split into prelude → recur (repeated r times) → coda blocks. During training, r is sampled from a Poisson log-normal distribution centered around `train_recur_mean` (default 4.0). During eval, you can test different recursion depths.
+The `recursive` branch implements a recursive transformer architecture where the model is split into prelude → recur (repeated r times) → coda blocks. During training, r is sampled from a Poisson log-normal distribution centered around `train_recur_mean` (default 4.0).
 
-Note: The recursive config creates `n_prelude + n_recur_block + n_coda` unique layer weights (default: 8). Effective depth per forward pass is `n_prelude + r × n_recur_block + n_coda`. Default r=4 gives 20 effective layers, matching the original depth=20.
+**Architecture:**
+- `n_prelude=2` + `n_recur_block=4` + `n_coda=2` = 8 unique layer weights
+- Effective depth = `n_prelude + r × n_recur_block + n_coda` = 2 + 4×4 + 2 = 20 (with r=4)
+- Weight sharing in the recurrent block enables test-time compute scaling
 
-**Test the implementation:**
+**Run the full pipeline:**
 ```bash
-uv run python -m scripts.test_recursive  # requires CUDA
+cd ~/nanochat
+apt-get update && apt-get install -y screen
+export WANDB_RUN=recursive
+screen -L -Logfile speedrun_recursive.log -S speedrun bash speedrun_recursive.sh
 ```
 
-**Train with recursive architecture** (uses same wandb project for comparison):
-```bash
-# Default: n_prelude=2, n_recur_block=4, n_coda=2, train_recur_max=16
-torchrun --standalone --nproc_per_node=8 -m scripts.base_train
-```
+This script:
+1. Sets up dependencies and validates the recursive architecture with tests
+2. Trains tokenizer and downloads data
+3. Pretrains the recursive model (same as speedrun.sh, recursive is default on this branch)
+4. Evaluates CORE with multiple recursion counts (r=2,4,8,16) to show test-time compute scaling
+5. Runs midtraining, SFT, and chat evaluation
 
-**Evaluate with different recursion counts:**
-```bash
-uv run python -m scripts.base_eval --num-recur=2,4,8,16
-```
+See [speedrun_recursive.sh](speedrun_recursive.sh) for details.
 
 ### Resuming or continuing after an interruption
 Reuse your original session, if still running, with `screen -r speedrun`, or start a new session by re-running the whole run commands above, optionally commenting out lines in `speedrun.sh` that you do not wish to re-run.
@@ -53,17 +57,18 @@ Reuse your original session, if still running, with `screen -r speedrun`, or sta
 ```bash
 source .venv/bin/activate
 export NANOCHAT_BASE_DIR="$HOME/.cache/nanochat"
+export REPO_ID="Trelis/nanochat"
+
 # Base/Mid/SFT checkpoints into subfolders of one repo
-python -m scripts.push_to_hf --stage base --repo-id Trelis/nanochat --path-in-repo base/d20
-python -m scripts.push_to_hf --stage mid  --repo-id Trelis/nanochat --path-in-repo mid/d20
-python -m scripts.push_to_hf --stage sft  --repo-id Trelis/nanochat --path-in-repo sft/d20
+python -m scripts.push_to_hf --stage base --repo-id $REPO_ID --path-in-repo base/d20
+python -m scripts.push_to_hf --stage mid  --repo-id $REPO_ID --path-in-repo mid/d20
+python -m scripts.push_to_hf --stage sft  --repo-id $REPO_ID --path-in-repo sft/d20
 
 # Report + Tokenizer folders (use --model-dir explicitly)
-# export NANOCHAT_BASE_DIR="$HOME/.cache/nanochat"
 python -m scripts.push_to_hf --model-dir "$NANOCHAT_BASE_DIR/report" \
-  --repo-id Trelis/nanochat --path-in-repo report/latest
+  --repo-id $REPO_ID --path-in-repo report/latest
 python -m scripts.push_to_hf --model-dir "$NANOCHAT_BASE_DIR/tokenizer" \
-  --repo-id Trelis/nanochat --path-in-repo tokenizer/latest
+  --repo-id $REPO_ID --path-in-repo tokenizer/latest
 ```
 
 ### Downloading checkpoints from HuggingFace
