@@ -18,13 +18,13 @@ See [https://github.com/TrelisResearch/nanochat]() for details on how to downloa
 - inject_mode = "concat_linear" (learned adapter, identity-initialized) # the recycle stream is concatenated with inputs and passed through a shrinking linear layer; identity-init ensures gradients flow
 - recur_warm_start = True # the recycle stream is zero initialised for the first token generated, but the next token borrows the last state from the previous token, accelerating inference
 - kv_cache_recur_budget = 1 (cache only final recurrence) # the final recurrence state is always used for later tokens, saving memory and assisting accuracy
-- Sampling: Poisson log-normal distribution (σ=0.5)
+- Sampling: Poisson log-normal distribution (σ=0.5) # this was used for pre-, mid- and sft- training. Although perhaps it would have been better to use a constant number of recursions for the mid and post training, which would also allow torch compile to be used for mid-training.
 ```
 
 ## Results
 
 ### SFT
-**Trelis d20:**
+**NanoChat d20:**
 ARC-Easy: 0.4630
 ARC-Challenge: 0.3234
 MMLU: 0.3222
@@ -33,5 +33,13 @@ HumanEval: 0.1220
 SpellingBee: 0.9883
 ChatCORE metric: 0.2732
 
-**Trelis Recursive:**
+**NanoChat Recursive - num_recur=2:**
 
+
+**NanoChat Recursive - num_recur=4:**
+
+
+**NanoChat Recursive - num_recur=8:**
+
+
+**NanoChat Recursive - num_recur=16:**
