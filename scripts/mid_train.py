@@ -75,7 +75,7 @@ if pretrain_batch_size is not None and device_batch_size > pretrain_batch_size:
 orig_model = model
 # Increase cache size to prevent recompilation OOM when switching train/eval modes
 torch._dynamo.config.cache_size_limit = 64
-model = torch.compile(model, dynamic=False)
+# model = torch.compile(model, dynamic=False)
 depth = model.config.n_layer
 num_flops_per_token = model.estimate_flops()
 tokens_per_fwdbwd = device_batch_size * max_seq_len # tokens per iteration for a single rank
