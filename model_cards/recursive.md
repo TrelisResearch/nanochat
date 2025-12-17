@@ -11,6 +11,7 @@ About Recursive NanoChat:
 - This model is trained on the same amount of data and using roughly the same number of flops as a [non-recursive 20 layer nanochat model](https://huggingface.co/Trelis/nanochat).
 - It has roughly half of the original model parameters.
 - See the `recursive` branch of [https://github.com/TrelisResearch/nanochat]() for details on how to download and run.
+- See full logs on [Weights and Biases](https://wandb.ai/trelis/nanochat).
 
 ## Design Choices
 - (P, R, C) = (2, 4, 2) → 8 unique layer weights # 2 prelude layers, 4 recursive and 2 coda
