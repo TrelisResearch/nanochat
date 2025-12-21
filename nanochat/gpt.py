@@ -19,9 +19,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from nanochat.common import get_dist_info, print0
+from nanochat.common import get_dist_info
 from nanochat.muon import Muon, DistMuon
 from nanochat.adamw import DistAdamW
+from jvp_flash_attention.jvp_attention import attention as jvp_attention
 
 @dataclass
 class GPTConfig:
@@ -31,6 +32,7 @@ class GPTConfig:
     n_head: int = 6 # number of query heads
     n_kv_head: int = 6 # number of key/value heads (GQA)
     n_embd: int = 768
+    use_flash_attn: bool = False
 
 
 def norm(x):
@@ -56,6 +58,7 @@ class CausalSelfAttention(nn.Module):
         self.n_kv_head = config.n_kv_head
         self.n_embd = config.n_embd
         self.head_dim = self.n_embd // self.n_head
+        self.use_flash_attn = config.use_flash_attn
         assert self.n_embd % self.n_head == 0
         assert self.n_kv_head <= self.n_head and self.n_head % self.n_kv_head == 0
         self.c_q = nn.Linear(self.n_embd, self.n_head * self.head_dim, bias=False)
@@ -65,7 +68,9 @@ class CausalSelfAttention(nn.Module):
 
     def forward(self, x, cos_sin, kv_cache):
         B, T, C = x.size()
-
+        # In energy model x = [x_input, x_output]
+        S = T // 2
+        
         # Project the input to get queries, keys, and values
         q = self.c_q(x).view(B, T, self.n_head, self.head_dim)
         k = self.c_k(x).view(B, T, self.n_kv_head, self.head_dim)
@@ -73,7 +78,16 @@ class CausalSelfAttention(nn.Module):
 
         # Apply Rotary Embeddings to queries and keys to get relative positional encoding
         cos, sin = cos_sin
-        q, k = apply_rotary_emb(q, cos, sin), apply_rotary_emb(k, cos, sin) # QK rotary embedding
+
+        # Applying ROPE indepently for input and output
+        q_in, q_out = q[:, :S, :, :], q[:, S:, :, :]
+        k_in, k_out = k[:, :S, :, :], k[:, S:, :, :]
+        q_in, k_in = apply_rotary_emb(q_in, cos, sin), apply_rotary_emb(k_in, cos, sin) # QK rotary embedding
+        q_out, k_out = apply_rotary_emb(q_out, cos, sin), apply_rotary_emb(k_out, cos, sin) # QK rotary embedding
+
+        q = torch.concat([q_in, q_out], dim=1)
+        k = torch.concat([k_in, k_out], dim=1)
+        
         q, k = norm(q), norm(k) # QK norm
         q, k, v = q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2) # make head be batch dim, i.e. (B, T, H, D) -> (B, H, T, D)
 
@@ -85,24 +99,57 @@ class CausalSelfAttention(nn.Module):
 
         # Attention: queries attend to keys/values autoregressively. A few cases to handle:
         enable_gqa = self.n_head != self.n_kv_head # Group Query Attention (GQA): duplicate key/value heads to match query heads if desired
-        if kv_cache is None or Tq == Tk:
-            # During training (no KV cache), attend as usual with causal attention
-            # And even if there is KV cache, we can still use this simple version when Tq == Tk
-            y = F.scaled_dot_product_attention(q, k, v, is_causal=True, enable_gqa=enable_gqa)
-        elif Tq == 1:
-            # During inference but with a single query in this forward pass:
-            # The query has to attend to all the keys/values in the cache
-            y = F.scaled_dot_product_attention(q, k, v, is_causal=False, enable_gqa=enable_gqa)
+        assert not enable_gqa, "GQA not implemented in Energy Transformer"
+        assert Tq > 1, "Inference with single query not implemented in Energy Transformer"
+        assert kv_cache is None, "KV cache not implemented in Energy Tranformer"
+
+
+        # Computing custom mask for Energy Transformers
+        causal_mask = torch.tril(torch.ones(S, S, device=q.device)) # .view(1, 1, T, T)
+        eye_mask = torch.eye(S, device=q.device)
+        zero_mask = torch.zeros_like(causal_mask, device=q.device)
+        attn_mask = torch.concat(
+            [
+                torch.concat([causal_mask, zero_mask], dim=1),
+                torch.concat([causal_mask, eye_mask], dim=1)
+            ],
+            dim=0,
+        ).view(1, 1, T, T)
+        
+        if not self.use_flash_attn:
+            # Vanilla attention implemented in pytorch
+            attn_scores = torch.matmul(q, k.transpose(-2, -1))
+            attn_scores = attn_scores / math.sqrt(self.head_dim)
+            attn_scores = attn_scores.masked_fill(attn_mask == 0, float('-inf'))
+            attn_weights = F.softmax(attn_scores, dim=-1)
+            y = torch.matmul(attn_weights, v)
         else:
-            # During inference AND we have a chunk of queries in this forward pass:
-            # First, each query attends to all the cached keys/values (i.e. full prefix)
-            attn_mask = torch.zeros((Tq, Tk), dtype=torch.bool, device=q.device) # True = keep, False = mask
-            prefix_len = Tk - Tq
-            if prefix_len > 0: # can't be negative but could be zero
-                attn_mask[:, :prefix_len] = True
-            # Then, causal attention within this chunk
-            attn_mask[:, prefix_len:] = torch.tril(torch.ones((Tq, Tq), dtype=torch.bool, device=q.device))
-            y = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask, enable_gqa=enable_gqa)
+            attn_mask = attn_mask.repeat(B, self.n_head, 1, 1).bool()
+            y = jvp_attention(
+                q,
+                k,
+                v,
+                attn_mask=attn_mask,
+            )
+        
+        # if kv_cache is None or Tq == Tk:
+        #     # During training (no KV cache), attend as usual with causal attention
+        #     # And even if there is KV cache, we can still use this simple version when Tq == Tk
+        #     y = F.scaled_dot_product_attention(q, k, v, is_causal=True, enable_gqa=enable_gqa)
+        # elif Tq == 1:
+        #     # During inference but with a single query in this forward pass:
+        #     # The query has to attend to all the keys/values in the cache
+        #     y = F.scaled_dot_product_attention(q, k, v, is_causal=False, enable_gqa=enable_gqa)
+        # else:
+        #     # During inference AND we have a chunk of queries in this forward pass:
+        #     # First, each query attends to all the cached keys/values (i.e. full prefix)
+        #     attn_mask = torch.zeros((Tq, Tk), dtype=torch.bool, device=q.device) # True = keep, False = mask
+        #     prefix_len = Tk - Tq
+        #     if prefix_len > 0: # can't be negative but could be zero
+        #         attn_mask[:, :prefix_len] = True
+        #     # Then, causal attention within this chunk
+        #     attn_mask[:, prefix_len:] = torch.tril(torch.ones((Tq, Tq), dtype=torch.bool, device=q.device))
+        #     y = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask, enable_gqa=enable_gqa)
 
         # Re-assemble the heads side by side and project back to residual stream
         y = y.transpose(1, 2).contiguous().view(B, T, -1)
@@ -135,13 +182,86 @@ class Block(nn.Module):
         return x
 
 
+class EBT(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.config = config
+        self.h = nn.ModuleList([Block(config, layer_idx) for layer_idx in range(config.n_layer)])
+        self.energy_head = nn.Linear(config.n_embd, 1, bias=False)
+        self.rotary_seq_len = config.sequence_len * 10 # 10X over-compute should be enough, TODO make nicer?
+        head_dim = config.n_embd // config.n_head
+        cos, sin = self._precompute_rotary_embeddings(self.rotary_seq_len, head_dim)
+        self.register_buffer("cos", cos, persistent=False) # persistent=False means it's not saved to the checkpoint
+        self.register_buffer("sin", sin, persistent=False)
+
+    def init_weights(self):
+        self.apply(self._init_weights)
+        # zero out classifier weights
+        torch.nn.init.zeros_(self.energy_head.weight)
+        # zero out c_proj weights in all blocks
+        for block in self.h:
+            torch.nn.init.zeros_(block.mlp.c_proj.weight)
+            torch.nn.init.zeros_(block.attn.c_proj.weight)
+        # init the rotary embeddings
+        head_dim = self.config.n_embd // self.config.n_head
+        cos, sin = self._precompute_rotary_embeddings(self.rotary_seq_len, head_dim)
+        self.cos, self.sin = cos, sin
+        
+    def _init_weights(self, module):
+        if isinstance(module, nn.Linear):
+            # https://arxiv.org/pdf/2310.17813
+            fan_out = module.weight.size(0)
+            fan_in = module.weight.size(1)
+            std = 1.0 / math.sqrt(fan_in) * min(1.0, math.sqrt(fan_out / fan_in))
+            torch.nn.init.normal_(module.weight, mean=0.0, std=std)
+            if module.bias is not None:
+                torch.nn.init.zeros_(module.bias)
+        elif isinstance(module, nn.Embedding):
+            torch.nn.init.normal_(module.weight, mean=0.0, std=1.0)
+
+    # TODO: bump base theta more, e.g. 100K is more common more recently
+    def _precompute_rotary_embeddings(self, seq_len, head_dim, base=10000, device=None):
+        # autodetect the device from model embeddings
+        if device is None:
+            device = self.energy_head.weight.device
+        # stride the channels
+        channel_range = torch.arange(0, head_dim, 2, dtype=torch.float32, device=device)
+        inv_freq = 1.0 / (base ** (channel_range / head_dim))
+        # stride the time steps
+        t = torch.arange(seq_len, dtype=torch.float32, device=device)
+        # calculate the rotation frequencies at each (time, channel) pair
+        freqs = torch.outer(t, inv_freq)
+        cos, sin = freqs.cos(), freqs.sin()
+        cos, sin = cos.bfloat16(), sin.bfloat16() # keep them in bfloat16
+        cos, sin = cos[None, :, None, :], sin[None, :, None, :] # add batch and head dims for later broadcasting
+        return cos, sin
+
+    def forward(self, x, kv_cache=None):
+        B, T, D = x.size()
+        S = T // 2
+        # Grab the rotary embeddings for the current sequence length (they are of shape (1, seq_len, 1, head_dim/2))
+        assert T <= self.cos.size(1), f"Sequence length grew beyond the rotary embeddings cache: {T} > {self.cos.size(1)}"
+        assert x.device == self.cos.device, f"Rotary embeddings and idx are on different devices: {x.device} != {self.cos.device}"
+        assert self.cos.dtype == torch.bfloat16, "Rotary embeddings must be in bfloat16"
+        # if kv cache exists, we need to offset the rotary embeddings to the current position in the cache
+        T0 = 0 if kv_cache is None else kv_cache.get_pos()
+        cos_sin = self.cos[:, T0:T0+S], self.sin[:, T0:T0+S] # truncate cache to current sequence length
+
+        # Forward the trunk of the Transformer
+        x = norm(x)
+        for block in self.h:
+            x = block(x, cos_sin, kv_cache)
+        x = norm(x)
+        return self.energy_head(x)
+       
+
 class GPT(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.config = config
         self.transformer = nn.ModuleDict({
             "wte": nn.Embedding(config.vocab_size, config.n_embd),
-            "h": nn.ModuleList([Block(config, layer_idx) for layer_idx in range(config.n_layer)]),
+            "ebt": EBT(config),
         })
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
         # To support meta device initialization, we init the rotary embeddings here, but it's fake
