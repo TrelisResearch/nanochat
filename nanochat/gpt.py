@@ -309,17 +309,12 @@ class GPT(nn.Module):
             self.config.sequence_len,
         )
         # Following the paper this only takes into consideration the forward and the backward pass w.r.t input
-        num_flops_per_token_forward_backwards_input = self.config.n_steps * (
-            4 * (nparams - nparams_embedding) + 8 * l * h * q * t
+        num_flops_per_token = (
+            self.config.n_steps
+            * (20 * (nparams - nparams_embedding) + 40 * l * h * q * t)
+            // 2
         )
-        # Backward pass w.r.t the weights
-        num_flops_per_token_backward_weights = (
-            2 * (nparams - nparams_embedding) + 4 * l * h * q * t
-        )
-        return (
-            num_flops_per_token_backward_weights
-            + num_flops_per_token_forward_backwards_input
-        )
+        return num_flops_per_token
 
     def setup_optimizers(
         self, unembedding_lr=0.004, embedding_lr=0.2, matrix_lr=0.02, weight_decay=0.0
