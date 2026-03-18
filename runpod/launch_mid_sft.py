@@ -67,12 +67,17 @@ TRAIN_CMD = textwrap.dedent("""\
     # Install dependencies
     pip install -e "." --quiet
 
-    # Pull base checkpoint from nanochat-recursive HF repo
+    # Pull base checkpoint + tokenizer from nanochat-recursive HF repo
     python -m scripts.pull_from_hf \\
       --repo-id Trelis/nanochat-recursive \\
       --repo-path base/d20 \\
       --stage base \\
       --target-tag d20
+
+    python -m scripts.pull_from_hf \\
+      --repo-id Trelis/nanochat-recursive \\
+      --repo-path tokenizer/latest \\
+      --dest-dir "${NANOCHAT_BASE_DIR:-/root/.cache/nanochat}/tokenizer"
 
     # Mid-training with gated loss
     torchrun --standalone --nproc_per_node=8 -m scripts.mid_train -- \\

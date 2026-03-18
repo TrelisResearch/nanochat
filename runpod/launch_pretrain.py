@@ -69,12 +69,17 @@ TRAIN_CMD = textwrap.dedent("""\
 
     pip install -e "." --quiet
 
-    # Pull nanochat-recursive base checkpoint (starting point for gated training)
+    # Pull nanochat-recursive base checkpoint + tokenizer (starting point for gated training)
     python -m scripts.pull_from_hf \\
       --repo-id Trelis/nanochat-recursive \\
       --repo-path base/d20 \\
       --stage base \\
       --target-tag d20
+
+    python -m scripts.pull_from_hf \\
+      --repo-id Trelis/nanochat-recursive \\
+      --repo-path tokenizer/latest \\
+      --dest-dir "${NANOCHAT_BASE_DIR:-/root/.cache/nanochat}/tokenizer"
 
     # Download and tokenize pre-training data (slow — ~1-2 hrs)
     python -m scripts.prepare_data
