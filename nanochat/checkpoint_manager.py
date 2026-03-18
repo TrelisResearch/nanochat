@@ -74,6 +74,12 @@ def build_model(checkpoint_dir, step, device, phase):
     # Hack: fix torch compile issue, which prepends all keys with _orig_mod.
     model_data = {k.removeprefix("_orig_mod."): v for k, v in model_data.items()}
     model_config_kwargs = meta_data["model_config"]
+    # Compatibility: old nanochat-recursive checkpoints used train_recur_mean/max;
+    # gated-recursive replaced these with fixed_k.
+    _OLD_FIELDS = {"train_recur_mean", "train_recur_max"}
+    model_config_kwargs = {k: v for k, v in model_config_kwargs.items() if k not in _OLD_FIELDS}
+    if "fixed_k" not in model_config_kwargs:
+        model_config_kwargs["fixed_k"] = 4
     log0(f"Building model with config: {model_config_kwargs}")
     model_config = GPTConfig(**model_config_kwargs)
     with torch.device("meta"):
@@ -81,7 +87,11 @@ def build_model(checkpoint_dir, step, device, phase):
     # Load the model state
     model.to_empty(device=device)
     model.init_weights() # note: this is dumb, but we need to init the rotary embeddings. TODO: fix model re-init
-    model.load_state_dict(model_data, strict=True, assign=True)
+    missing, unexpected = model.load_state_dict(model_data, strict=False, assign=True)
+    if missing:
+        log0(f"Missing keys (using init_weights values): {missing}")
+    if unexpected:
+        log0(f"Unexpected keys (ignored): {unexpected}")
     # Put the model in the right training phase / mode
     if phase == "eval":
         model.eval()
