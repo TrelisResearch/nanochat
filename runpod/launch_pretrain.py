@@ -67,7 +67,7 @@ TRAIN_CMD = textwrap.dedent("""\
     fi
     cd nanochat
 
-    pip install -e ".[train]" --quiet
+    pip install -e "." --quiet
 
     # Pull nanochat-recursive base checkpoint (starting point for gated training)
     python -m scripts.pull_from_hf \\

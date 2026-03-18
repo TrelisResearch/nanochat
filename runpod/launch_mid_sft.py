@@ -65,7 +65,7 @@ TRAIN_CMD = textwrap.dedent("""\
     cd nanochat
 
     # Install dependencies
-    pip install -e ".[train]" --quiet
+    pip install -e "." --quiet
 
     # Pull base checkpoint from nanochat-recursive HF repo
     python -m scripts.pull_from_hf \\
