@@ -18,7 +18,10 @@ DEBIAN_FRONTEND=noninteractive apt-get install -y \
 
 # ── 3 · Repo ────────────────────────────────────────────────────────────────
 cd /workspace
+NANOCHAT_BRANCH="${NANOCHAT_BRANCH:-master}"
 if [ -d nanochat/.git ]; then
+  git -C nanochat fetch --all
+  git -C nanochat checkout "$NANOCHAT_BRANCH"
   git -C nanochat pull --ff-only
 else
   if [ -n "${GITHUB_PAT:-}" ]; then
@@ -26,6 +29,7 @@ else
   else
     git clone https://github.com/TrelisResearch/nanochat.git
   fi
+  git -C nanochat checkout "$NANOCHAT_BRANCH"
 fi
 cd nanochat
 

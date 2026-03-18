@@ -1,0 +1,163 @@
+"""
+Launch gated-recursive continued pre-training on RunPod.
+
+Use this AFTER mid+SFT is working. Pre-training requires downloading the full
+training dataset (~hundreds of GB) which takes significant time.
+
+Workflow on the pod:
+  1. Pull nanochat-recursive base checkpoint from HF
+  2. Download + tokenize training data
+  3. Run base_train.py with load_pretrained pointing at recursive checkpoint
+     and gated loss (lambda schedule: 0→lambda_gate over training)
+  4. Then kick off mid_train + chat_sft
+  5. Push all stages to HF
+
+Target budget: ~20-30% of original nanochat training tokens (~$20-30 on 8×H100)
+This is set via --target_param_data_ratio=5 (vs default Chinchilla=20).
+
+Usage:
+  uv run runpod/launch_pretrain.py --dry-run
+  uv run runpod/launch_pretrain.py --name gated-pretrain
+"""
+
+import argparse
+import json
+import os
+import sys
+import textwrap
+from pathlib import Path
+
+
+def load_env():
+    env_path = Path(__file__).parent.parent / ".env"
+    if env_path.exists():
+        for line in env_path.read_text().splitlines():
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                k, _, v = line.partition("=")
+                os.environ.setdefault(k.strip(), v.strip())
+
+
+TRAIN_CMD = textwrap.dedent("""\
+    set -euo pipefail
+    cd /workspace/nanochat
+
+    pip install -e ".[train]" --quiet
+
+    # Pull nanochat-recursive base checkpoint (starting point for gated training)
+    python -m scripts.pull_from_hf \\
+      --repo-id Trelis/nanochat-recursive \\
+      --repo-path base/d20 \\
+      --stage base \\
+      --target-tag d20
+
+    # Download and tokenize pre-training data (slow — ~1-2 hrs)
+    python -m scripts.prepare_data
+
+    # Continued pre-training: load recursive weights, add gates, train ~20% of tokens
+    # target_param_data_ratio=5 gives ~20% of Chinchilla budget (vs default 20)
+    torchrun --standalone --nproc_per_node=8 -m scripts.base_train \\
+      --run=gated-recursive-pretrain \\
+      --load_pretrained="${NANOCHAT_BASE_DIR}/base_checkpoints/d20" \\
+      --lambda_gate=1e-3 \\
+      --gate_warmup_ratio=0.2 \\
+      --target_param_data_ratio=5 \\
+      --warmdown_ratio=0.3
+
+    # Push pre-trained gated model
+    python -m scripts.push_to_hf \\
+      --stage base \\
+      --repo-id Trelis/nanochat-gated-recursive \\
+      --path-in-repo base/d20
+
+    # Mid-training
+    torchrun --standalone --nproc_per_node=8 -m scripts.mid_train \\
+      --run=gated-recursive-mid \\
+      --lambda_gate=1e-3 \\
+      --gate_warmup_ratio=0.2
+
+    # SFT
+    torchrun --standalone --nproc_per_node=8 -m scripts.chat_sft \\
+      --run=gated-recursive-sft \\
+      --source=mid \\
+      --lambda_gate=1e-3 \\
+      --gate_warmup_ratio=0.2
+
+    # Push all
+    python -m scripts.push_to_hf \\
+      --stage sft \\
+      --repo-id Trelis/nanochat-gated-recursive \\
+      --path-in-repo sft/d20
+""")
+
+
+def create_pod(api_key: str, config: dict, dry_run: bool = False):
+    import urllib.request
+    url = "https://rest.runpod.io/v1/pods"
+    body = json.dumps(config).encode()
+    req = urllib.request.Request(
+        url, data=body,
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        method="POST",
+    )
+    if dry_run:
+        print("DRY RUN — would POST to:", url)
+        print(json.dumps(config, indent=2))
+        return {}
+    with urllib.request.urlopen(req) as resp:
+        return json.loads(resp.read())
+
+
+def main():
+    load_env()
+    sys.path.insert(0, str(Path(__file__).parent))
+    import pod_config as cfg
+
+    parser = argparse.ArgumentParser(description="Launch gated-recursive continued pre-training")
+    parser.add_argument("--name",    default="nanochat-gated-pretrain")
+    parser.add_argument("--branch",  default="gated-recursive")
+    parser.add_argument("--gpus",    type=int, default=cfg.GPU_COUNT)
+    parser.add_argument("--image",   default=cfg.IMAGE)
+    parser.add_argument("--disk",    type=int, default=cfg.CONTAINER_DISK_GB)
+    parser.add_argument("--volume",  type=int, default=1000)   # larger for pre-training data
+    parser.add_argument("--dry-run", action="store_true")
+    args = parser.parse_args()
+
+    api_key = os.environ.get("RUNPOD_API_KEY", "")
+    if not api_key and not args.dry_run:
+        sys.exit("RUNPOD_API_KEY not set.")
+
+    def fwd(key):
+        v = os.environ.get(key, "")
+        return {key: v} if v else {}
+
+    env = {"NANOCHAT_BRANCH": args.branch}
+    for k in ["WANDB_API_KEY", "HUGGING_FACE_HUB_TOKEN", "GITHUB_PAT",
+              "GIT_USER_NAME", "GIT_USER_EMAIL", "HF_HUB_ENABLE_HF_TRANSFER",
+              "NANOCHAT_BASE_DIR"]:
+        env.update(fwd(k))
+
+    pod_config = {
+        "name": args.name,
+        "imageName": args.image,
+        "gpuTypeIds": cfg.GPU_TYPE_IDS,
+        "gpuCount": args.gpus,
+        "cloudType": cfg.CLOUD_TYPE,
+        "containerDiskInGb": args.disk,
+        "volumeInGb": args.volume,
+        "volumeMountPath": cfg.VOLUME_MOUNT_PATH,
+        "ports": cfg.PORTS,
+        "env": env,
+        "dockerStartCmd": ["bash", "-c", TRAIN_CMD],
+    }
+
+    print(f"Launching '{args.name}': continued pre-train+mid+SFT on {args.gpus}×H100")
+    print(f"NOTE: Data download will take ~1-2hrs before training starts.")
+    result = create_pod(api_key, pod_config, dry_run=args.dry_run)
+    if result:
+        print(f"Pod created: id={result.get('id')}  cost=${result.get('costPerHr')}/hr")
+        print(f"Check status: uv run runpod/pod_status.py {result.get('id')}")
+
+
+if __name__ == "__main__":
+    main()
