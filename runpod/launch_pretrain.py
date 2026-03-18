@@ -40,7 +40,32 @@ def load_env():
 
 TRAIN_CMD = textwrap.dedent("""\
     set -euo pipefail
-    cd /workspace/nanochat
+    export PIP_ROOT_USER_ACTION=ignore
+
+    # ── System packages ──────────────────────────────────────────────────────
+    apt-get update -qq
+    DEBIAN_FRONTEND=noninteractive apt-get install -y git ninja-build build-essential python3-dev curl ca-certificates -qq
+
+    # ── Git identity ─────────────────────────────────────────────────────────
+    [ -n "${GIT_USER_NAME:-}"  ] && git config --global user.name  "$GIT_USER_NAME"
+    [ -n "${GIT_USER_EMAIL:-}" ] && git config --global user.email "$GIT_USER_EMAIL"
+
+    # ── Clone or update repo ─────────────────────────────────────────────────
+    cd /workspace
+    NANOCHAT_BRANCH="${NANOCHAT_BRANCH:-gated-recursive}"
+    if [ -d nanochat/.git ]; then
+      git -C nanochat fetch --all
+      git -C nanochat checkout "$NANOCHAT_BRANCH"
+      git -C nanochat pull --ff-only
+    else
+      if [ -n "${GITHUB_PAT:-}" ]; then
+        git clone "https://${GITHUB_PAT}@github.com/TrelisResearch/nanochat.git"
+      else
+        git clone https://github.com/TrelisResearch/nanochat.git
+      fi
+      git -C nanochat checkout "$NANOCHAT_BRANCH"
+    fi
+    cd nanochat
 
     pip install -e ".[train]" --quiet
 
