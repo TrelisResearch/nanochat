@@ -12,11 +12,9 @@ torchrun --standalone --nproc_per_node=8 -m scripts.mid_train -- --device_batch_
 from collections import deque
 import os
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
-import math
 import time
 import wandb
 import torch
-import numpy as np
 from contextlib import nullcontext
 from nanochat.common import compute_init, compute_cleanup, print0, DummyWandb, get_base_dir, autodetect_device_type
 from nanochat.tokenizer import get_token_bytes
@@ -50,6 +48,9 @@ eval_every = 150 # -1 = disable
 eval_tokens = 20*524288
 total_batch_size = 524288
 dry_run = 0 # dry_run=1 is for experiments: we will log to wandb but we won't write checkpoints or report
+# Gated recursion config
+lambda_gate = 1e-3 # sparsity penalty weight on total gate activation
+gate_warmup_ratio = 0.2 # fraction of training where λ=0 (gates stay open while block learns)
 config_keys = [k for k,v in globals().items() if not k.startswith('_') and isinstance(v, (int, float, bool, str))]
 exec(open(os.path.join('nanochat', 'configurator.py')).read()) # overrides from command line or config file
 user_config = {k: globals()[k] for k in config_keys} # possibly useful for logging
@@ -174,6 +175,13 @@ def get_muon_momentum(it):
     momentum = (1 - frac) * 0.85 + frac * 0.95
     return momentum
 
+# Lambda schedule for gate sparsity penalty
+def get_lambda_t(progress):
+    if progress < gate_warmup_ratio:
+        return 0.0
+    frac = (progress - gate_warmup_ratio) / max(1e-8, 1.0 - gate_warmup_ratio)
+    return lambda_gate * min(1.0, frac)
+
 # -----------------------------------------------------------------------------
 # Training loop
 x, y = next(train_loader) # prefetch the very first batch of data
@@ -241,20 +249,15 @@ while True:
     # evaluate the gradient
     synchronize()
     t0 = time.time()
+    lambda_t = get_lambda_t(progress)
     for micro_step in range(grad_accum_steps):
-        # Sample number of recurrences from Poisson log-normal distribution for recursive models
-        num_recur = None
-        if orig_model.config.n_recur_block > 0:
-            sigma = 0.5
-            r_bar = orig_model.config.train_recur_mean
-            tau = np.random.normal(math.log(r_bar) - 0.5 * sigma**2, sigma)
-            num_recur = np.random.poisson(math.exp(tau)) + 1
-            num_recur = max(1, min(num_recur, orig_model.config.train_recur_max))
         with autocast_ctx:
-            loss = model(x, y, num_recur=num_recur)
-        train_loss = loss.detach() # for logging
-        loss = loss / grad_accum_steps # each .backward() is a grad sum => normalize loss here
-        loss.backward()
+            ce_loss, gate_cost = model(x, y)  # fixed_k recurrences, returns (CE loss, gate activation sum)
+        gated_loss = ce_loss + lambda_t * gate_cost
+        train_loss = ce_loss.detach()
+        train_gate_cost = gate_cost.detach()
+        gated_loss = gated_loss / grad_accum_steps
+        gated_loss.backward()
         x, y = next(train_loader) # prefetch the next batch while the GPU is busy with forward/backward
         progress = max(progress, approx_progress) # only increase progress monotonically
     # step the optimizers
@@ -286,13 +289,15 @@ while True:
     mfu = 100 * flops_per_sec / promised_flops_per_sec_h100 # in %
     if step > 10:
         total_training_time += dt # only count the time after the first 10 steps
-    print0(f"step {step:05d} ({pct_done:.2f}%) | loss: {debiased_smooth_loss:.6f} | lrm: {lrm:.2f} | dt: {dt * 1000:.2f}ms | tok/sec: {tok_per_sec:,} | mfu: {mfu:.2f} | total time: {total_training_time/60:.2f}m")
+    print0(f"step {step:05d} ({pct_done:.2f}%) | loss: {debiased_smooth_loss:.6f} | gate: {train_gate_cost.item():.2f} | λ: {lambda_t:.2e} | lrm: {lrm:.2f} | dt: {dt * 1000:.2f}ms | tok/sec: {tok_per_sec:,} | mfu: {mfu:.2f} | total time: {total_training_time/60:.2f}m")
     if step % 10 == 0:
         wandb_run.log({
             "step": step,
             "total_training_flops": flops_so_far,
             "total_training_time": total_training_time,
             "train/loss": debiased_smooth_loss,
+            "train/gate_cost": train_gate_cost.item(),
+            "train/lambda_gate": lambda_t,
             "train/lrm": lrm,
             "train/dt": dt,
             "train/tok_per_sec": tok_per_sec,

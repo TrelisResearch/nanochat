@@ -35,8 +35,8 @@ class GPTConfig:
     n_prelude: int = 2  # number of prelude layers
     n_recur_block: int = 4  # number of layers in the recurrent block
     n_coda: int = 2  # number of coda layers
-    train_recur_mean: float = 4.0  # mean recurrences during training (also default r at inference)
-    train_recur_max: int = 16  # max recurrences sampled during training
+    fixed_k: int = 4  # fixed number of recurrences during training and inference
+    gate_threshold: float = 0.01  # early-exit: break when max gate value falls below this (inference only)
     recur_warm_start: bool = True  # warm-start recurrence from previous token's final state
     bptt_k: int = 4  # truncate backprop to last k recurrences (None = full backprop)
     kv_cache_recur_budget: int = 1  # KV cache slots per position for recurrence (1 = only store final)
@@ -163,6 +163,9 @@ class GPT(nn.Module):
         })
         # Input injection adapter: concat(e, s) -> linear -> u
         self.inject = nn.Linear(2 * config.n_embd, config.n_embd, bias=False)
+        # Gate projection: scalar gate per token controlling how much each recursion updates state
+        # g = sigmoid(gate_proj(s)) in [0,1]; s = s + g * (u - s)
+        self.gate_proj = nn.Linear(config.n_embd, 1, bias=True)
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
         # To support meta device initialization, we init the rotary embeddings here, but it's fake
         # As for rotary_seq_len, these rotary embeddings are pretty small/cheap in memory,
@@ -190,6 +193,9 @@ class GPT(nn.Module):
         with torch.no_grad():
             self.inject.weight.zero_()
             self.inject.weight[:, :n_embd].copy_(torch.eye(n_embd))
+        # Initialize gate bias to +2.0 so sigmoid(+2) ≈ 0.88: gates start open
+        # This lets the recurrent block learn useful representations before efficiency pressure
+        torch.nn.init.constant_(self.gate_proj.bias, 2.0)
         # init the rotary embeddings
         head_dim = self.config.n_embd // self.config.n_head
         cos, sin = self._precompute_rotary_embeddings(self.rotary_seq_len, head_dim)
@@ -236,8 +242,8 @@ class GPT(nn.Module):
 
         if self.config.n_recur_block > 0:
             # Recursive model: account for parameter reuse
-            # inject and recur params are used r times per forward pass
-            r = int(self.config.train_recur_mean)
+            # inject, gate, and recur params are used r times per forward pass
+            r = self.config.fixed_k
 
             # Params used once per forward
             prelude_params = sum(p.numel() for p in self.transformer.prelude.parameters())
@@ -247,8 +253,9 @@ class GPT(nn.Module):
 
             # Params used r times per forward (inside recurrence loop)
             inject_params = self.inject.weight.numel()
+            gate_params = self.gate_proj.weight.numel() + self.gate_proj.bias.numel()
             recur_params = sum(p.numel() for p in self.transformer.recur.parameters())
-            r_times_params = inject_params + recur_params
+            r_times_params = inject_params + gate_params + recur_params
 
             flops_from_params = 6 * (once_params + r * r_times_params)
 
@@ -267,17 +274,18 @@ class GPT(nn.Module):
     def setup_optimizers(self, unembedding_lr=0.004, embedding_lr=0.2, matrix_lr=0.02, weight_decay=0.0):
         model_dim = self.config.n_embd
         ddp, rank, local_rank, world_size = get_dist_info()
-        # Separate out all parameters into groups (matrix params from blocks + inject, embedding, lm_head)
+        # Separate out all parameters into groups (matrix params from blocks + inject, embedding, lm_head, gate)
         matrix_params = (
             list(self.transformer.prelude.parameters()) +
             list(self.transformer.recur.parameters()) +
             list(self.transformer.coda.parameters()) +
             list(self.inject.parameters())
         )
+        gate_proj_params = list(self.gate_proj.parameters())  # weight + bias
         embedding_params = list(self.transformer.wte.parameters())
         lm_head_params = list(self.lm_head.parameters())
-        assert len(list(self.parameters())) == len(matrix_params) + len(embedding_params) + len(lm_head_params)
-        # Create the AdamW optimizer for the embedding and lm_head
+        assert len(list(self.parameters())) == len(matrix_params) + len(gate_proj_params) + len(embedding_params) + len(lm_head_params)
+        # Create the AdamW optimizer for the embedding, lm_head, and gate_proj
         # Scale the LR for the AdamW parameters by ∝1/√dmodel (having tuned the LRs for 768 dim model)
         dmodel_lr_scale = (model_dim / 768) ** -0.5
         if rank == 0:
@@ -285,6 +293,7 @@ class GPT(nn.Module):
         adam_groups = [
             dict(params=lm_head_params, lr=unembedding_lr * dmodel_lr_scale),
             dict(params=embedding_params, lr=embedding_lr * dmodel_lr_scale),
+            dict(params=gate_proj_params, lr=embedding_lr * dmodel_lr_scale),  # gate: small param, AdamW
         ]
         adamw_kwargs = dict(betas=(0.8, 0.95), eps=1e-10, weight_decay=weight_decay)
         AdamWFactory = DistAdamW if ddp else partial(torch.optim.AdamW, fused=True)
@@ -302,23 +311,23 @@ class GPT(nn.Module):
 
     def forward(self, idx, targets=None, kv_cache=None, loss_reduction='mean', num_recur=None, warm_start_state=None):
         """
-        Forward pass with recursive transformer structure.
+        Forward pass with gated recursive transformer structure.
 
         Args:
             idx: Input token indices (B, T)
             targets: Target token indices for loss computation (B, T) or None for inference
             kv_cache: KV cache for inference (RecursiveKVCache or None)
             loss_reduction: Loss reduction mode ('mean' or 'none')
-            num_recur: Number of recurrences (defaults to train_recur_mean)
+            num_recur: Number of recurrences (defaults to fixed_k)
             warm_start_state: Optional warm-start state from previous forward pass (B, T, n_embd)
 
         Returns:
-            If targets is not None: loss
+            If targets is not None: (loss, gate_cost) where gate_cost = sum of all gate values
             Else: (logits, final_recur_state) where final_recur_state can be used for warm-start
         """
         B, T = idx.size()
         if num_recur is None:
-            num_recur = int(self.config.train_recur_mean)
+            num_recur = self.config.fixed_k
 
         # Grab the rotary embeddings for the current sequence length (they are of shape (1, seq_len, 1, head_dim/2))
         assert T <= self.cos.size(1), f"Sequence length grew beyond the rotary embeddings cache: {T} > {self.cos.size(1)}"
@@ -333,7 +342,6 @@ class GPT(nn.Module):
         x = norm(x)
 
         # 2. Prelude blocks (run once)
-        # For inference with KV cache, prelude uses cache_write=True
         for block in self.transformer.prelude:
             x = block(x, cos_sin, kv_cache)
         e = x  # prelude output, used for injection into each recurrence
@@ -349,19 +357,25 @@ class GPT(nn.Module):
         else:
             s = e
 
-        # 4. Recurrent block (run num_recur times)
-        # All recurrences read/write to KV cache. Since cache position only advances after
-        # the last layer (coda), recur layers overwrite the same slot each iteration.
-        # Only the final recurrence's write persists (paper Section 6.2: ring buffer with budget=1).
+        # 4. Gated recurrent block (run num_recur times with fixed K during training)
+        # Gate: g = sigmoid(gate_proj(s)) in [0,1]; gated update: s = s + g * (u - s)
+        # When g≈1 (open): full update. When g≈0 (closed): recursion is a no-op.
+        # At inference: early exit when all gates close below gate_threshold.
+        gate_cost = torch.tensor(0.0, device=idx.device)
         for i in range(num_recur):
-            # Input injection: u = inject(concat(e, s))
+            # Compute gate from current state (before this recursion step)
+            g = torch.sigmoid(self.gate_proj(s))  # [B, T, 1]
+            # Inference early exit: if all gates are closed, remaining steps are no-ops
+            if kv_cache is not None and g.max().item() < self.config.gate_threshold:
+                break
+            # Run recur blocks: u = recur(inject(concat(e, s)))
             u = self.inject(torch.cat([e, s], dim=-1))
-            # Run recur blocks with KV cache (all recurrences can attend to previous tokens)
             for block in self.transformer.recur:
                 u = block(u, cos_sin, kv_cache)
-            s = u  # update recurrent state
-            # Truncated BPTT: detach gradients for recurrences before the last bptt_k
-            # This limits gradient flow depth to bptt_k * n_recur_block layers through recurrence
+            # Gated state update
+            s = s + g * (u - s)
+            gate_cost = gate_cost + g.sum()
+            # Truncated BPTT: detach gradients for early recurrences
             if self.config.bptt_k is not None and i < num_recur - self.config.bptt_k:
                 s = s.detach()
 
@@ -374,14 +388,14 @@ class GPT(nn.Module):
         # Forward the lm_head (compute logits)
         softcap = 15
         if targets is not None:
-            # training mode: compute and return the loss
+            # training mode: return (loss, gate_cost) for gated loss = CE + λ * gate_cost
             logits = self.lm_head(x)
             logits = softcap * torch.tanh(logits / softcap) # logits softcap
             logits = logits.float() # use tf32/fp32 for logits
             loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1, reduction=loss_reduction)
-            return loss
+            return loss, gate_cost
         else:
-            # inference mode: compute and return the logits + final recurrent state for warm-start
+            # inference mode: return logits + final recurrent state for warm-start
             logits = self.lm_head(x)
             logits = softcap * torch.tanh(logits / softcap) # logits softcap
             return logits, s

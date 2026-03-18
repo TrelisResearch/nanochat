@@ -12,11 +12,9 @@ torchrun --standalone --nproc_per_node=8 -m scripts.chat_sft
 import os
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
-import math
 import wandb
 import torch
 import torch.distributed as dist
-import numpy as np
 from contextlib import nullcontext
 
 from nanochat.common import compute_init, compute_cleanup, get_base_dir, print0, DummyWandb, autodetect_device_type
@@ -57,6 +55,9 @@ eval_every = 100
 eval_steps = 100
 eval_metrics_every = 200
 eval_metrics_max_problems = 1024
+# Gated recursion config
+lambda_gate = 1e-3 # sparsity penalty weight on total gate activation
+gate_warmup_ratio = 0.2 # fraction of training where λ=0
 # now allow CLI to override the settings via the configurator lol
 config_keys = [k for k,v in globals().items() if not k.startswith('_') and isinstance(v, (int, float, bool, str))]
 exec(open(os.path.join('nanochat', 'configurator.py')).read()) # overrides from command line or config file
@@ -167,6 +168,14 @@ def get_lr_multiplier(it):
     lrm = 1.0 - it / num_iterations
     return lrm
 
+# Lambda schedule for gate sparsity penalty
+def get_lambda_t(it):
+    warmup_iters = round(gate_warmup_ratio * num_iterations)
+    if it < warmup_iters:
+        return 0.0
+    progress = (it - warmup_iters) / max(1, num_iterations - warmup_iters)
+    return lambda_gate * min(1.0, progress)
+
 # Go!
 step = 0
 train_iter = iter(train_loader)
@@ -181,7 +190,7 @@ for step in range(num_iterations):
         for _ in range(eval_steps):
             val_inputs, val_targets = next(val_iter)
             with torch.no_grad(), autocast_ctx:
-                loss = model(val_inputs, val_targets)
+                loss, _ = model(val_inputs, val_targets)
             losses.append(loss)
         val_loss = torch.stack(losses).mean() # average over eval_steps
         if ddp:
@@ -214,22 +223,16 @@ for step in range(num_iterations):
         break
 
     # evaluate the gradient
+    lambda_t = get_lambda_t(step)
     num_tokens = torch.tensor(0, device=device) # the number of "active" tokens of supervision seen
     for micro_step in range(grad_accum_steps):
         train_inputs, train_targets = next(train_iter)
-        # Sample number of recurrences from Poisson log-normal distribution for recursive models
-        num_recur = None
-        if orig_model.config.n_recur_block > 0:
-            sigma = 0.5
-            r_bar = orig_model.config.train_recur_mean
-            tau = np.random.normal(math.log(r_bar) - 0.5 * sigma**2, sigma)
-            num_recur = np.random.poisson(math.exp(tau)) + 1
-            num_recur = max(1, min(num_recur, orig_model.config.train_recur_max))
         with autocast_ctx:
-            loss = model(train_inputs, train_targets, num_recur=num_recur)
-        train_loss = loss.detach() # for logging
-        loss = loss / grad_accum_steps # each .backward() is a grad sum => normalize loss here
-        loss.backward() # accumulate the gradient
+            ce_loss, gate_cost = model(train_inputs, train_targets)
+        gated_loss = ce_loss + lambda_t * gate_cost
+        train_loss = ce_loss.detach()
+        gated_loss = gated_loss / grad_accum_steps
+        gated_loss.backward()
         num_tokens += (train_targets >= 0).sum()
     if ddp:
         dist.all_reduce(num_tokens, op=dist.ReduceOp.SUM) # sum over ranks
@@ -248,11 +251,12 @@ for step in range(num_iterations):
     # logging
     train_loss_item = train_loss.item()
     num_tokens_item = num_tokens.item()
-    print0(f"Step {step:05d}/{num_iterations:05d} | Training loss: {train_loss_item:.6f}| lrm: {lrm:.6f}| num_tokens: {num_tokens_item:,}")
+    print0(f"Step {step:05d}/{num_iterations:05d} | Training loss: {train_loss_item:.6f} | λ: {lambda_t:.2e} | lrm: {lrm:.6f} | num_tokens: {num_tokens_item:,}")
     wandb_run.log({
         "step": step,
         "lrm": lrm,
         "train_loss": train_loss_item,
+        "train/lambda_gate": lambda_t,
         "num_tokens": num_tokens_item,
     })
     step += 1

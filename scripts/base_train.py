@@ -14,12 +14,10 @@ python -m scripts.base_train --depth=4 --max_seq_len=512 --device_batch_size=1 -
 import os
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 import time
-import math
 from contextlib import nullcontext
 
 import wandb
 import torch
-import numpy as np
 
 from nanochat.gpt import GPT, GPTConfig
 from nanochat.dataloader import tokenizing_distributed_data_loader, tokenizing_distributed_data_loader_with_state
@@ -43,9 +41,13 @@ max_seq_len = 2048 # max context length
 n_prelude = 2 # number of prelude layers
 n_recur_block = 4 # number of layers in the recurrent block
 n_coda = 2 # number of coda layers
-train_recur_mean = 4.0 # mean recurrences during training (also default r at inference); r=4 gives 20 effective layers
-train_recur_max = 16 # max recurrences sampled during training
+fixed_k = 4 # fixed number of recurrences during training; fixed_k=4 gives 20 effective layers (iso-flops with d20)
 bptt_k = 4 # truncate backprop to last k recurrences (limits gradient depth)
+# Gated recursion config
+lambda_gate = 1e-3 # sparsity penalty weight on total gate activation (λ * sum(gates))
+gate_warmup_ratio = 0.2 # fraction of training steps where λ=0 (gates open, block learns first)
+# Load pretrained weights (for continuing from nanochat-recursive checkpoint with strict=False)
+load_pretrained = "" # path to checkpoint dir to load weights from (empty = train from scratch)
 # Training horizon. Only one of these 3 will be used, in this order of precedence.
 num_iterations = -1 # explicit number of steps of the optimization (-1 = disable)
 target_flops = -1.0 # calculate num_iterations to reach target_flops. Useful for scaling laws experiments (-1 = disable)
@@ -104,7 +106,7 @@ print0(f"num_layers: {num_layers}")
 print0(f"model_dim: {model_dim}")
 print0(f"num_heads: {num_heads}")
 print0(f"num_kv_heads: {num_kv_heads}")
-print0(f"Recursive config: prelude={n_prelude}, recur={n_recur_block}, coda={n_coda}, train_recur_mean={train_recur_mean}, train_recur_max={train_recur_max}, bptt_k={bptt_k}")
+print0(f"Gated recursive config: prelude={n_prelude}, recur={n_recur_block}, coda={n_coda}, fixed_k={fixed_k}, bptt_k={bptt_k}, lambda_gate={lambda_gate}, gate_warmup_ratio={gate_warmup_ratio}")
 
 # Optimizer / data / training length related hyperparameters
 # figure out the needed gradient accumulation to reach the desired total batch size
@@ -123,9 +125,9 @@ print0(f"Total batch size {total_batch_size:,} => gradient accumulation steps: {
 model_config_kwargs = dict(
     sequence_len=max_seq_len, vocab_size=vocab_size, n_layer=num_layers,
     n_head=num_heads, n_kv_head=num_kv_heads, n_embd=model_dim,
-    # Recursive transformer config
+    # Gated recursive transformer config
     n_prelude=n_prelude, n_recur_block=n_recur_block, n_coda=n_coda,
-    train_recur_mean=train_recur_mean, train_recur_max=train_recur_max, bptt_k=bptt_k,
+    fixed_k=fixed_k, bptt_k=bptt_k,
 )
 with torch.device("meta"):
     model_config = GPTConfig(**model_config_kwargs)
@@ -133,10 +135,28 @@ with torch.device("meta"):
 model.to_empty(device=device)
 model.init_weights()
 
-# If we are resuming, overwrite the model parameters with those of the checkpoint
+# If loading pretrained weights from a previous checkpoint (e.g. nanochat-recursive), do it now.
+# strict=False allows the new gate_proj layer to be randomly initialized (then we restore its bias to +2).
 base_dir = get_base_dir()
 output_dirname = model_tag if model_tag else f"d{depth}" # e.g. d12
 checkpoint_dir = os.path.join(base_dir, "base_checkpoints", output_dirname)
+if load_pretrained:
+    print0(f"Loading pretrained weights from {load_pretrained} (strict=False, gate_proj freshly initialized)")
+    import glob as _glob
+    ckpt_files = sorted(_glob.glob(os.path.join(load_pretrained, "model_*.pt")))
+    assert ckpt_files, f"No model_*.pt files found in {load_pretrained}"
+    ckpt_path = ckpt_files[-1]  # take the latest step checkpoint
+    print0(f"  Loading: {ckpt_path}")
+    pretrained_state = torch.load(ckpt_path, map_location=device, weights_only=True)
+    missing, unexpected = model.load_state_dict(pretrained_state, strict=False, assign=True)
+    print0(f"  Missing keys (new params): {missing}")
+    print0(f"  Unexpected keys (dropped): {unexpected}")
+    # Re-init gate bias to +2 (sigmoid≈0.88) so gates start open after loading
+    with torch.no_grad():
+        model.gate_proj.bias.fill_(2.0)
+    print0("  gate_proj.bias re-initialized to +2.0 (gates start open)")
+
+# If resuming from a gated-recursive checkpoint, overwrite the model parameters
 resuming = resume_from_step != -1
 if resuming:
     print0(f"Resuming optimization from step {resume_from_step}")
@@ -144,14 +164,9 @@ if resuming:
     model.load_state_dict(model_data, strict=True, assign=True)
     del model_data # free up this memory after the copy
 
-orig_model = model # original, uncompiled model, for saving raw model state_dict and for inference/evaluation (because the shapes may change shape)
-# Use dynamic=True for recursive models where num_recur varies per batch
-# This prevents recompilation OOM from Poisson-sampled num_recur values
-is_recursive = model_config.n_recur_block > 0
-# Increase cache size to prevent recompilation OOM when switching train/eval modes
-# Default is 8, which fills up from num_recur variants + train/eval toggles
-torch._dynamo.config.cache_size_limit = 64
-model = torch.compile(model, dynamic=is_recursive)
+orig_model = model # original, uncompiled model, for saving raw model state_dict and for inference/evaluation
+# Fixed K means fixed tensor shapes → dynamic=False is safe and gives best compile performance
+model = torch.compile(model, dynamic=False)
 num_params = sum(p.numel() for p in model.parameters())
 print0(f"Number of parameters: {num_params:,}")
 num_flops_per_token = model.estimate_flops()
@@ -215,6 +230,14 @@ def get_muon_momentum(it):
     frac = min(it / 300, 1)
     momentum = (1 - frac) * 0.85 + frac * 0.95
     return momentum
+
+# Lambda schedule for gate sparsity penalty: 0 for first gate_warmup_ratio of training, then linear ramp
+def get_lambda_t(it):
+    warmup_iters = round(gate_warmup_ratio * num_iterations)
+    if it < warmup_iters:
+        return 0.0
+    progress = (it - warmup_iters) / max(1, num_iterations - warmup_iters)
+    return lambda_gate * min(1.0, progress)
 
 # -----------------------------------------------------------------------------
 # Loop state (variables updated by the training loop)
@@ -325,20 +348,16 @@ while True:
     # evaluate the gradient
     synchronize()
     t0 = time.time()
+    lambda_t = get_lambda_t(step)
     for micro_step in range(grad_accum_steps):
-        # Sample number of recurrences from Poisson log-normal distribution (per paper Section 3.3)
-        # τ ~ N(log(r̄) - ½σ², σ) where σ=0.5, then r ~ Poisson(e^τ) + 1
-        sigma = 0.5
-        r_bar = model_config.train_recur_mean
-        tau = np.random.normal(math.log(r_bar) - 0.5 * sigma**2, sigma)
-        num_recur = np.random.poisson(math.exp(tau)) + 1
-        num_recur = max(1, min(num_recur, model_config.train_recur_max))  # clamp to [1, max]
         with autocast_ctx:
-            loss = model(x, y, num_recur=num_recur)
-        train_loss = loss.detach() # for logging
-        loss = loss / grad_accum_steps # each .backward() is a grad sum => normalize loss here
-        loss.backward()
-        x, y, dataloader_state_dict = next(train_loader) # prefetch the next batch while the GPU is busy with forward/backward
+            ce_loss, gate_cost = model(x, y)  # fixed_k recurrences, returns (CE loss, gate activation sum)
+        gated_loss = ce_loss + lambda_t * gate_cost
+        train_loss = ce_loss.detach() # log CE loss only (gate cost is a separate diagnostic)
+        train_gate_cost = gate_cost.detach()
+        gated_loss = gated_loss / grad_accum_steps # each .backward() is a grad sum => normalize
+        gated_loss.backward()
+        x, y, dataloader_state_dict = next(train_loader) # prefetch next batch while GPU is busy
     # gradient clipping
     grad_clip_enabled = grad_clip > 0.0
     if grad_clip_enabled:
@@ -372,13 +391,15 @@ while True:
     if step > 10:
         total_training_time += dt # only count the time after the first 10 steps
     print_grad_norm = f" grad norm: {grad_norm:.4f} |" if grad_clip_enabled else ""
-    print0(f"step {step:05d}/{num_iterations:05d} ({pct_done:.2f}%) | loss: {debiased_smooth_loss:.6f} |{print_grad_norm} lrm: {lrm:.2f} | dt: {dt * 1000:.2f}ms | tok/sec: {tok_per_sec:,} | mfu: {mfu:.2f} | total time: {total_training_time/60:.2f}m")
+    print0(f"step {step:05d}/{num_iterations:05d} ({pct_done:.2f}%) | loss: {debiased_smooth_loss:.6f} | gate: {train_gate_cost.item():.2f} | λ: {lambda_t:.2e} |{print_grad_norm} lrm: {lrm:.2f} | dt: {dt * 1000:.2f}ms | tok/sec: {tok_per_sec:,} | mfu: {mfu:.2f} | total time: {total_training_time/60:.2f}m")
     if step % 100 == 0:
         log_data = {
             "step": step,
             "total_training_flops": flops_so_far,
             "total_training_time": total_training_time,
             "train/loss": debiased_smooth_loss,
+            "train/gate_cost": train_gate_cost.item(),
+            "train/lambda_gate": lambda_t,
             "train/lrm": lrm,
             "train/dt": dt,
             "train/tok_per_sec": tok_per_sec,
