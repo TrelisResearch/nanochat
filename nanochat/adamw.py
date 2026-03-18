@@ -74,3 +74,34 @@ class DistAdamW(torch.optim.Optimizer):
                 idx += 1
                 all_reduce_futures.append(dist.all_gather_into_tensor(p, p_slice, async_op=True).get_future())
         torch.futures.collect_all(all_reduce_futures).wait()
+
+
+class CompositeOptimizer:
+    """
+    Wraps multiple optimizers behind a single interface.
+
+    Used to combine DistAdamW (for large params divisible by world_size) with
+    regular AdamW (for small params like gate_proj whose shape[0] < world_size).
+    The training scripts see one adamw_optimizer with a flat param_groups list.
+    """
+
+    def __init__(self, optimizers: list):
+        self._opts = optimizers
+        # Flat view of all param groups — dict objects are shared by reference,
+        # so LR writes propagate to the underlying optimizers automatically.
+        self.param_groups = [g for opt in optimizers for g in opt.param_groups]
+
+    def step(self):
+        for opt in self._opts:
+            opt.step()
+
+    def zero_grad(self, set_to_none: bool = False):
+        for opt in self._opts:
+            opt.zero_grad(set_to_none=set_to_none)
+
+    def state_dict(self):
+        return [opt.state_dict() for opt in self._opts]
+
+    def load_state_dict(self, state):
+        for opt, sd in zip(self._opts, state):
+            opt.load_state_dict(sd)

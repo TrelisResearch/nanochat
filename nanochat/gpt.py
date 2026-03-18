@@ -21,7 +21,7 @@ import torch.nn.functional as F
 
 from nanochat.common import get_dist_info, print0
 from nanochat.muon import Muon, DistMuon
-from nanochat.adamw import DistAdamW
+from nanochat.adamw import DistAdamW, CompositeOptimizer
 
 @dataclass
 class GPTConfig:
@@ -290,14 +290,29 @@ class GPT(nn.Module):
         dmodel_lr_scale = (model_dim / 768) ** -0.5
         if rank == 0:
             print(f"Scaling the LR for the AdamW parameters ∝1/√({model_dim}/768) = {dmodel_lr_scale:.6f}")
-        adam_groups = [
-            dict(params=lm_head_params, lr=unembedding_lr * dmodel_lr_scale),
-            dict(params=embedding_params, lr=embedding_lr * dmodel_lr_scale),
-            dict(params=gate_proj_params, lr=embedding_lr * dmodel_lr_scale),  # gate: small param, AdamW
-        ]
+        # DistAdamW shards gradients via reduce_scatter_tensor, which requires
+        # param.shape[0] % world_size == 0. lm_head and wte have shape[0] = vocab_size
+        # (50304, divisible by 8). gate_proj has shape[0] = 1 — NOT divisible — so it
+        # must use plain AdamW in DDP mode to avoid the size-mismatch ValueError.
         adamw_kwargs = dict(betas=(0.8, 0.95), eps=1e-10, weight_decay=weight_decay)
-        AdamWFactory = DistAdamW if ddp else partial(torch.optim.AdamW, fused=True)
-        adamw_optimizer = AdamWFactory(adam_groups, **adamw_kwargs)
+        gate_lr = embedding_lr * dmodel_lr_scale
+        if ddp:
+            dist_adam_groups = [
+                dict(params=lm_head_params, lr=unembedding_lr * dmodel_lr_scale),
+                dict(params=embedding_params, lr=embedding_lr * dmodel_lr_scale),
+            ]
+            dist_adamw = DistAdamW(dist_adam_groups, **adamw_kwargs)
+            gate_adamw = torch.optim.AdamW(
+                [dict(params=gate_proj_params, lr=gate_lr)], **adamw_kwargs
+            )
+            adamw_optimizer = CompositeOptimizer([dist_adamw, gate_adamw])
+        else:
+            adam_groups = [
+                dict(params=lm_head_params, lr=unembedding_lr * dmodel_lr_scale),
+                dict(params=embedding_params, lr=embedding_lr * dmodel_lr_scale),
+                dict(params=gate_proj_params, lr=gate_lr),
+            ]
+            adamw_optimizer = partial(torch.optim.AdamW, fused=True)(adam_groups, **adamw_kwargs)
         # Create the Muon optimizer for the linear layers
         muon_kwargs = dict(lr=matrix_lr, momentum=0.95)
         MuonFactory = DistMuon if ddp else Muon
