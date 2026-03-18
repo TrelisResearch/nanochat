@@ -69,6 +69,14 @@ TRAIN_CMD = textwrap.dedent("""\
 
     pip install -e "." --quiet
 
+    # Download identity conversations
+    IDENTITY_DIR="${NANOCHAT_BASE_DIR:-/root/.cache/nanochat}"
+    mkdir -p "$IDENTITY_DIR"
+    if [ ! -f "$IDENTITY_DIR/identity_conversations.jsonl" ]; then
+      curl -L -o "$IDENTITY_DIR/identity_conversations.jsonl" \
+        https://karpathy-public.s3.us-west-2.amazonaws.com/identity_conversations.jsonl
+    fi
+
     # Pull nanochat-recursive base checkpoint + tokenizer (starting point for gated training)
     python -m scripts.pull_from_hf \\
       --repo-id Trelis/nanochat-recursive \\

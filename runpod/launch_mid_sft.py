@@ -67,6 +67,14 @@ TRAIN_CMD = textwrap.dedent("""\
     # Install dependencies
     pip install -e "." --quiet
 
+    # Download identity conversations (small file, ~1K rows of synthetic identity data)
+    IDENTITY_DIR="${NANOCHAT_BASE_DIR:-/root/.cache/nanochat}"
+    mkdir -p "$IDENTITY_DIR"
+    if [ ! -f "$IDENTITY_DIR/identity_conversations.jsonl" ]; then
+      curl -L -o "$IDENTITY_DIR/identity_conversations.jsonl" \
+        https://karpathy-public.s3.us-west-2.amazonaws.com/identity_conversations.jsonl
+    fi
+
     # Pull base checkpoint + tokenizer from nanochat-recursive HF repo
     python -m scripts.pull_from_hf \\
       --repo-id Trelis/nanochat-recursive \\
