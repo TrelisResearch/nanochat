@@ -1,12 +1,12 @@
 """
 Launch gated-recursive continued pre-training on RunPod.
 
-Use this AFTER mid+SFT is working. Pre-training requires downloading the full
-training dataset (~hundreds of GB) which takes significant time.
+Use this AFTER mid+SFT is working. Pre-training downloads ~24GB of data
+(240 shards × ~100MB each) before training starts.
 
 Workflow on the pod:
   1. Pull nanochat-recursive base checkpoint from HF
-  2. Download + tokenize training data
+  2. Download training data (~24GB)
   3. Run base_train.py with load_pretrained pointing at recursive checkpoint
      and gated loss (lambda schedule: 0→lambda_gate over training)
   4. Then kick off mid_train + chat_sft
@@ -81,8 +81,13 @@ TRAIN_CMD = textwrap.dedent("""\
       --repo-path tokenizer/latest \\
       --dest-dir "${NANOCHAT_BASE_DIR:-/root/.cache/nanochat}/tokenizer"
 
-    # Download and tokenize pre-training data (slow — ~1-2 hrs)
-    python -m scripts.prepare_data
+    # Download pre-training data shards (240 shards × ~100MB ≈ 24GB)
+    # Tokenizer is already pulled from HF above, no need to retrain it
+    python -m nanochat.dataset -n 8
+    python -m nanochat.dataset -n 240 &
+    DATASET_DOWNLOAD_PID=$!
+    echo "Waiting for dataset download to complete..."
+    wait $DATASET_DOWNLOAD_PID
 
     # Continued pre-training: load recursive weights, add gates, train ~20% of tokens
     # target_param_data_ratio=5 gives ~20% of Chinchilla budget (vs default 20)
@@ -104,7 +109,8 @@ TRAIN_CMD = textwrap.dedent("""\
     torchrun --standalone --nproc_per_node=8 -m scripts.mid_train -- \\
       --run=gated-recursive-mid \\
       --lambda_gate=1e-3 \\
-      --gate_warmup_ratio=0.2
+      --gate_warmup_ratio=0.2 \\
+      --device_batch_size=8
 
     # SFT
     torchrun --standalone --nproc_per_node=8 -m scripts.chat_sft -- \\
