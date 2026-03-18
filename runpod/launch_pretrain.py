@@ -81,7 +81,7 @@ TRAIN_CMD = textwrap.dedent("""\
 
     # Continued pre-training: load recursive weights, add gates, train ~20% of tokens
     # target_param_data_ratio=5 gives ~20% of Chinchilla budget (vs default 20)
-    torchrun --standalone --nproc_per_node=8 -m scripts.base_train \\
+    torchrun --standalone --nproc_per_node=8 -m scripts.base_train -- \\
       --run=gated-recursive-pretrain \\
       --load_pretrained="${NANOCHAT_BASE_DIR}/base_checkpoints/d20" \\
       --lambda_gate=1e-3 \\
@@ -96,13 +96,13 @@ TRAIN_CMD = textwrap.dedent("""\
       --path-in-repo base/d20
 
     # Mid-training
-    torchrun --standalone --nproc_per_node=8 -m scripts.mid_train \\
+    torchrun --standalone --nproc_per_node=8 -m scripts.mid_train -- \\
       --run=gated-recursive-mid \\
       --lambda_gate=1e-3 \\
       --gate_warmup_ratio=0.2
 
     # SFT
-    torchrun --standalone --nproc_per_node=8 -m scripts.chat_sft \\
+    torchrun --standalone --nproc_per_node=8 -m scripts.chat_sft -- \\
       --run=gated-recursive-sft \\
       --source=mid \\
       --lambda_gate=1e-3 \\

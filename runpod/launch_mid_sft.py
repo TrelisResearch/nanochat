@@ -75,13 +75,13 @@ TRAIN_CMD = textwrap.dedent("""\
       --target-tag d20
 
     # Mid-training with gated loss
-    torchrun --standalone --nproc_per_node=8 -m scripts.mid_train \\
+    torchrun --standalone --nproc_per_node=8 -m scripts.mid_train -- \\
       --run=gated-recursive-mid \\
       --lambda_gate=1e-3 \\
       --gate_warmup_ratio=0.2
 
     # SFT with gated loss
-    torchrun --standalone --nproc_per_node=8 -m scripts.chat_sft \\
+    torchrun --standalone --nproc_per_node=8 -m scripts.chat_sft -- \\
       --run=gated-recursive-sft \\
       --source=mid \\
       --lambda_gate=1e-3 \\
