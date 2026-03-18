@@ -80,13 +80,14 @@ TRAIN_CMD = textwrap.dedent("""\
       --dest-dir "${NANOCHAT_BASE_DIR:-/root/.cache/nanochat}/tokenizer"
 
     # Mid-training with gated loss
-    # device_batch_size=8: gated model runs 4 recurrences so activation memory is ~4x base;
-    # grad_accum compensates so total_batch_size stays 524288 tokens.
+    # device_batch_size=16: gated model stores extra tensors for backward through gated update
+    # (s_old + u-s per step x4 recurrences ≈ +1.7 GB vs recursive at same batch).
+    # Halving from 32→16 frees several GB; grad_accum=2 keeps total_batch_size at 524288 tokens.
     torchrun --standalone --nproc_per_node=8 -m scripts.mid_train -- \\
       --run=gated-recursive-mid \\
       --lambda_gate=1e-3 \\
       --gate_warmup_ratio=0.2 \\
-      --device_batch_size=8
+      --device_batch_size=16
 
     # SFT with gated loss
     torchrun --standalone --nproc_per_node=8 -m scripts.chat_sft -- \\

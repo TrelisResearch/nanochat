@@ -110,7 +110,7 @@ TRAIN_CMD = textwrap.dedent("""\
       --run=gated-recursive-mid \\
       --lambda_gate=1e-3 \\
       --gate_warmup_ratio=0.2 \\
-      --device_batch_size=8
+      --device_batch_size=16
 
     # SFT
     torchrun --standalone --nproc_per_node=8 -m scripts.chat_sft -- \\
