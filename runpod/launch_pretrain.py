@@ -35,7 +35,7 @@ def load_env():
                 os.environ.setdefault(k.strip(), v.strip())
 
 
-TRAIN_CMD = textwrap.dedent("""\
+TRAIN_CMD_TEMPLATE = textwrap.dedent("""\
     set -euo pipefail
     /start.sh &  # start RunPod services (generates SSH host keys, starts sshd)
     sleep 15     # wait for sshd to be ready before training starts
@@ -93,8 +93,8 @@ TRAIN_CMD = textwrap.dedent("""\
     # Pre-training from scratch with gated loss.
     # Gates co-adapt with representations from the start (no pre-training mismatch).
     torchrun --standalone --nproc_per_node=8 -m scripts.base_train -- \\
-      --run=gated-recursive-pretrain \\
-      --lambda_gate=1e-3 \\
+      --run=gated-recursive-pretrain-{version} \\
+      --lambda_gate={lambda_gate} \\
       --gate_warmup_ratio=0.2 \\
       --target_param_data_ratio=20 \\
       --warmdown_ratio=0.2
@@ -103,27 +103,27 @@ TRAIN_CMD = textwrap.dedent("""\
     python -m scripts.push_to_hf \\
       --stage base \\
       --repo-id Trelis/nanochat-gated-recursive \\
-      --path-in-repo base/d20
+      --path-in-repo base/d20-{version}
 
     # Mid-training: gates already trained, no warmup needed
     torchrun --standalone --nproc_per_node=8 -m scripts.mid_train -- \\
-      --run=gated-recursive-mid \\
-      --lambda_gate=1e-3 \\
+      --run=gated-recursive-mid-{version} \\
+      --lambda_gate={lambda_gate} \\
       --gate_warmup_ratio=0.0 \\
       --device_batch_size=32
 
     # SFT: gates already trained, no warmup needed
     torchrun --standalone --nproc_per_node=8 -m scripts.chat_sft -- \\
-      --run=gated-recursive-sft \\
+      --run=gated-recursive-sft-{version} \\
       --source=mid \\
-      --lambda_gate=1e-3 \\
+      --lambda_gate={lambda_gate} \\
       --gate_warmup_ratio=0.0
 
     # Push all
     python -m scripts.push_to_hf \\
       --stage sft \\
       --repo-id Trelis/nanochat-gated-recursive \\
-      --path-in-repo sft/d20
+      --path-in-repo sft/d20-{version}
 
     # Self-terminate pod so RunPod doesn't restart the container
     curl -s -X DELETE -H "Authorization: Bearer ${RUNPOD_API_KEY}" \
@@ -154,13 +154,15 @@ def main():
     import pod_config as cfg
 
     parser = argparse.ArgumentParser(description="Launch gated-recursive continued pre-training")
-    parser.add_argument("--name",    default="nanochat-gated-pretrain")
-    parser.add_argument("--branch",  default="gated-recursive")
-    parser.add_argument("--gpus",    type=int, default=cfg.GPU_COUNT)
-    parser.add_argument("--image",   default=cfg.IMAGE)
-    parser.add_argument("--disk",    type=int, default=cfg.CONTAINER_DISK_GB)
-    parser.add_argument("--volume",  type=int, default=1000)   # larger for pre-training data
-    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--name",        default="nanochat-gated-pretrain")
+    parser.add_argument("--version",     required=True, help="Run version tag, e.g. v12 (appended to run names and HF paths)")
+    parser.add_argument("--lambda-gate", default="1e-3", help="Gate sparsity penalty weight (default: 1e-3)")
+    parser.add_argument("--branch",      default="gated-recursive")
+    parser.add_argument("--gpus",        type=int, default=cfg.GPU_COUNT)
+    parser.add_argument("--image",       default=cfg.IMAGE)
+    parser.add_argument("--disk",        type=int, default=cfg.CONTAINER_DISK_GB)
+    parser.add_argument("--volume",      type=int, default=1000)
+    parser.add_argument("--dry-run",     action="store_true")
     args = parser.parse_args()
 
     api_key = os.environ.get("RUNPOD_API_KEY", "")
@@ -189,7 +191,9 @@ def main():
         "ports": cfg.PORTS,
         "supportPublicIp": True,
         "env": env,
-        "dockerStartCmd": ["bash", "-c", TRAIN_CMD],
+        "dockerStartCmd": ["bash", "-c", TRAIN_CMD_TEMPLATE
+            .replace("{version}", args.version)
+            .replace("{lambda_gate}", args.lambda_gate)],
     }
 
     print(f"Launching '{args.name}': pre-train+mid+SFT on {args.gpus}×{args.gpu_type[0] if hasattr(args, 'gpu_type') else 'GPU'}")
