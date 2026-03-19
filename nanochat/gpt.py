@@ -373,9 +373,13 @@ class GPT(nn.Module):
             s = e
 
         # 4. Gated recurrent block (run num_recur times with fixed K during training)
-        # Gate: g = sigmoid(gate_proj(s)) in [0,1]; gated update: s = s + g * (u - s)
-        # When g≈1 (open): full update. When g≈0 (closed): recursion is a no-op.
-        # At inference: early exit when all gates close below gate_threshold.
+        # Step 0: always full update (g=1) — guarantees full gradients to recur blocks,
+        #         avoiding the chicken-and-egg where weak gradients prevent recurrence from
+        #         becoming useful before gate pressure closes it.
+        # Steps 1+: g = sigmoid(gate_proj(u - s)); gate decides whether to continue.
+        #           Small u-s means converged → gate closes. Large u-s → gate stays open.
+        # At inference: after step 0, early exit if all token gates close below gate_threshold.
+        # gate_mean = avg gate openness over steps 1..(num_recur-1), in [0, 1].
         gate_cost = torch.tensor(0.0, device=idx.device)
         B, T = idx.shape
         for i in range(num_recur):
@@ -383,20 +387,23 @@ class GPT(nn.Module):
             u = self.inject(torch.cat([e, s], dim=-1))
             for block in self.transformer.recur:
                 u = block(u, cos_sin, kv_cache)
-            # Compute gate from u-s: how much would this step change the state?
-            # Small u-s means converged → gate closes. Large u-s means still updating → gate stays open.
-            g = torch.sigmoid(self.gate_proj(u - s))  # [B, T, 1]
-            # Inference early exit: if all gates are closed, remaining steps are no-ops
-            if kv_cache is not None and g.max().item() < self.config.gate_threshold:
-                break
-            # Gated state update
-            s = s + g * (u - s)
-            gate_cost = gate_cost + g.sum()
+            if i == 0:
+                # First recurrence: always full update, no gating
+                s = u
+            else:
+                # Subsequent recurrences: gate from proposed update magnitude
+                g = torch.sigmoid(self.gate_proj(u - s))  # [B, T, 1]
+                # Inference early exit: if all gates are closed, skip remaining steps
+                if kv_cache is not None and g.max().item() < self.config.gate_threshold:
+                    break
+                s = s + g * (u - s)
+                gate_cost = gate_cost + g.sum()
             # Truncated BPTT: detach gradients for early recurrences
             if self.config.bptt_k is not None and i < num_recur - self.config.bptt_k:
                 s = s.detach()
-        # Normalise: gate_mean = average gate openness in [0, 1] across all tokens and recur steps
-        gate_cost = gate_cost / (B * T * num_recur)
+        # Normalise over gated steps only (steps 1..num_recur-1)
+        gated_steps = num_recur - 1
+        gate_cost = gate_cost / (B * T * max(1, gated_steps))
 
         # 5. Coda blocks (run once)
         x = s

@@ -207,13 +207,25 @@ Two candidates for step 11:
 
 Don't allow gate_proj to update until λ kicks in. This keeps gates open during warmup so recur blocks learn against a consistent open-gate input distribution, before gating pressure is applied. Pending v10 results — if gate_mean stays stuck at ~0.09 all through warmup, this is the fix.
 
-## Option B: Gate conditioned on u-s instead of s
+## Option B: Gate conditioned on u-s instead of s ✅ Implemented in v11
 
-**Current:** `g = sigmoid(gate_proj(s))` — always do recurrence first, then gate decides whether to do *another* based on current state.
+**Was:** `g = sigmoid(gate_proj(s))` — gate computed before recurrence from current state.
 
-**Proposed:** `g = sigmoid(gate_proj(u - s))` — after each recurrence, gate looks at the update `u-s` to decide whether to do another. Small `u-s` means the state barely changed → converged → close gate.
+**Now:** always run recur step 0 with a full forced update (`s = u`), then for steps 1+ compute `g = sigmoid(gate_proj(u - s))`. Small `u-s` means state barely changed → converged → close gate.
 
-This is more natural: always do at least one recurrence, then after each step decide whether another is warranted based on how much the state just changed. The model learns what scale of `u-s` means "done". Also likely better for training stability since at least one recurrence always fires.
+Benefits:
+- Recur blocks always get full gradients for step 0 (g=1 forced) — breaks the chicken-and-egg
+- Gate signal is more natural: "how much did this step want to change things?"
+- At inference: always pay one recur cost, then gate decides whether to continue
 
-**Tradeoff:** Can't skip computing `u` before deciding — always pays at least one recur cost. Current design can skip all recur computation when gate=0.
+**gate_mean normalisation:** averaged over steps 1..(K-1) only (step 0 is always open, not counted).
+
+## Option C: Forced full first recurrence ✅ Implemented in v11
+
+For step 0, `s = u` always (no gate). For steps 1+, `g = sigmoid(gate_proj(u - s))`. This ensures:
+1. Recur blocks always receive full-strength gradients on the first pass
+2. The gate only needs to learn "is another recurrence worth it?" — a simpler task
+3. The chicken-and-egg problem (gates close before recurrence becomes useful) is eliminated for step 0
+
+This is now the default implementation (combined with Option B).
 
