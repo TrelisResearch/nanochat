@@ -109,6 +109,10 @@ TRAIN_CMD = textwrap.dedent("""\
       --stage sft \\
       --repo-id Trelis/nanochat-gated-recursive \\
       --path-in-repo sft/d20
+
+    # Self-terminate pod so RunPod doesn't restart the container
+    curl -s -X DELETE -H "Authorization: Bearer ${RUNPOD_API_KEY}" \
+      "https://rest.runpod.io/v1/pods/${RUNPOD_POD_ID}" || true
 """)
 
 
