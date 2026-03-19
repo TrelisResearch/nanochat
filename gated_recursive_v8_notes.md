@@ -238,8 +238,41 @@ Same hyperparams as v11 but with gate_proj frozen during warmup.
 |-----|--------|
 | Freeze gate_proj during warmup | After backward and before optimizer.step(), gate_proj gradients are zeroed while lambda_t==0. This prevents gate_proj.bias from drifting negative before recur has learned useful representations. Once lambda kicks in (after warmup), gate_proj unfreezes automatically. |
 
+## Status / Results
+Pod: `2ojwof97su030d`, 8×A100, $11.92/hr. Running in parallel with v10.
+
+**Warmup phase (steps 0–25 on wandb chart ≈ training steps 0–2505):** gate_mean stable at ~0.85–0.88. Freeze working correctly. Small drift during warmup is inject/recur changing what `norm(u-s)` looks like through frozen but non-zero gate_proj weights.
+
+**At unfreeze (step ~25):** gate_mean jumps UP toward 1.0. Key positive signal — recur learned something useful during warmup (forced step-0 gradients did their job). CE strongly prefers recurrence, overcoming λ=1e-3.
+
+**After full λ ramp (step ~60, training step ~6000):** gate_mean pinned at 1.0. λ=1e-3 too weak to close any gates — penalty is ~1e-3 nats vs CE gradient strongly preferring full recurrence. Unclear if gate_mean will move in second half of training. Running to completion to check per-task eval gate_mean differentiation.
+
+**CE vs λ dynamics:** The soft gating design (`s = s + g*(u-s)`) means CE always benefits slightly from every recurrence step even at g≈0. No token has a clean "recurrence gives zero benefit" signal, so CE never strongly prefers g=0. λ needs to outweigh CE gradient at the token level, which requires larger λ than 1e-3 for this model.
+
+---
+
+# Gated Recursive Training — v13 Run Notes
+Date: 2026-03-19 (active)
+
+## What we ran
+Same as v12 but with `lambda_gate=1e-2` (10× larger). Testing whether stronger λ can push gates off 1.0 and create token-level selectivity.
+Pod: `4a25jrpxvljhjz`, 8×H100, $21.52/hr.
+
+## Key question
+Does gate_mean drop below 1.0 after warmup, and does it differentiate by task difficulty at eval?
+
 ## Status
-- Launching 2026-03-19
+- Provisioning 2026-03-19, results TBD
+
+---
+
+## Notes on soft vs hard gating
+
+**Soft gating** (`s = s + g*(u-s)`): recur always runs, update scaled by g. CE always sees some benefit from every recurrence step, so gradient toward g=0 is weak. Gradient also vanishes near g=0 and g=1 (g*(1-g)→0).
+
+**Hard gating** (straight-through): binary decision per token, cleaner CE signal. But in batched training you still run recur for all tokens and mask output — no compute savings, and gradient signal is nearly identical with straight-through. Real savings only at inference when whole batch exits early (already handled by `g.max() < threshold`). Not a big architectural difference in practice.
+
+**If v13 also pins at 1.0:** the lever is λ strength, not soft vs hard gating. Next step would be λ=1e-1 or rethinking whether dynamic gating from pre-training is achievable with this architecture.
 
 ---
 
