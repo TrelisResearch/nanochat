@@ -338,6 +338,36 @@ def test_generate_with_temperature_zero_is_deterministic():
 
 
 # ---------------------------------------------------------------------------
+# Gradient checkpointing
+# ---------------------------------------------------------------------------
+
+def test_gradient_checkpointing_matches_no_checkpointing():
+    """gradient_checkpointing=True must produce identical forward outputs to False."""
+    torch.manual_seed(0)
+    cfg_no = make_config(gradient_checkpointing=False)
+    m_no = make_model(cfg_no)
+    cfg_yes = make_config(gradient_checkpointing=True)
+    m_yes = make_model(cfg_yes)
+    m_yes.load_state_dict(m_no.state_dict())
+
+    B, T = 2, 8
+    idx = torch.randint(0, 256, (B, T))
+    targets = torch.randint(0, 256, (B, T))
+
+    m_no.train(); m_yes.train()
+    loss_no, gc_no = m_no(idx, targets)
+    loss_yes, gc_yes = m_yes(idx, targets)
+
+    assert torch.allclose(loss_no, loss_yes, atol=1e-5), f"Loss mismatch: {loss_no} vs {loss_yes}"
+    assert torch.allclose(gc_no, gc_yes, atol=1e-5), f"Gate cost mismatch: {gc_no} vs {gc_yes}"
+
+    # Verify gradients still flow
+    loss_yes.backward()
+    assert m_yes.gate_proj.weight.grad is not None
+    assert m_yes.inject.weight.grad is not None
+
+
+# ---------------------------------------------------------------------------
 # FLOPs estimate
 # ---------------------------------------------------------------------------
 

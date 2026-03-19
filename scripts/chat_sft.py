@@ -58,6 +58,7 @@ eval_metrics_max_problems = 1024
 # Gated recursion config
 lambda_gate = 1e-3 # sparsity penalty weight on total gate activation
 gate_warmup_ratio = 0.2 # fraction of training where λ=0
+gradient_checkpointing = True
 # now allow CLI to override the settings via the configurator lol
 config_keys = [k for k,v in globals().items() if not k.startswith('_') and isinstance(v, (int, float, bool, str))]
 exec(open(os.path.join('nanochat', 'configurator.py')).read()) # overrides from command line or config file
@@ -78,6 +79,7 @@ wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(project="nanochat-sf
 # Load the model and tokenizer
 model, tokenizer, meta = load_model(source, device, phase="train", model_tag=model_tag, step=step)
 orig_model = model # original, uncompiled model
+orig_model.config.gradient_checkpointing = gradient_checkpointing
 # model = torch.compile(model, dynamic=True) # doesn't work super well because of variable lengths of inputs
 engine = Engine(model, tokenizer) # will be used for inline model evaluation only
 
@@ -231,6 +233,7 @@ for step in range(num_iterations):
             ce_loss, gate_cost = model(train_inputs, train_targets)
         gated_loss = ce_loss + lambda_t * gate_cost
         train_loss = ce_loss.detach()
+        train_gate_cost = gate_cost.detach()
         gated_loss = gated_loss / grad_accum_steps
         gated_loss.backward()
         num_tokens += (train_targets >= 0).sum()
@@ -251,11 +254,13 @@ for step in range(num_iterations):
     # logging
     train_loss_item = train_loss.item()
     num_tokens_item = num_tokens.item()
-    print0(f"Step {step:05d}/{num_iterations:05d} | Training loss: {train_loss_item:.6f} | λ: {lambda_t:.2e} | lrm: {lrm:.6f} | num_tokens: {num_tokens_item:,}")
+    gate_mean = train_gate_cost.item() / (device_batch_size * train_inputs.shape[1] * orig_model.config.fixed_k)
+    print0(f"Step {step:05d}/{num_iterations:05d} | Training loss: {train_loss_item:.6f} | gate: {gate_mean:.4f} | λ: {lambda_t:.2e} | lrm: {lrm:.6f} | num_tokens: {num_tokens_item:,}")
     wandb_run.log({
         "step": step,
         "lrm": lrm,
         "train_loss": train_loss_item,
+        "train/gate_mean": gate_mean,
         "train/lambda_gate": lambda_t,
         "num_tokens": num_tokens_item,
     })

@@ -46,6 +46,7 @@ bptt_k = 4 # truncate backprop to last k recurrences (limits gradient depth)
 # Gated recursion config
 lambda_gate = 1e-3 # sparsity penalty weight on total gate activation (λ * sum(gates))
 gate_warmup_ratio = 0.2 # fraction of training steps where λ=0 (gates open, block learns first)
+gradient_checkpointing = True  # recompute recur activations in backward; ~4x activation memory saving, ~33% compute overhead
 # Load pretrained weights (for continuing from nanochat-recursive checkpoint with strict=False)
 load_pretrained = "" # path to checkpoint dir to load weights from (empty = train from scratch)
 # Training horizon. Only one of these 3 will be used, in this order of precedence.
@@ -128,6 +129,7 @@ model_config_kwargs = dict(
     # Gated recursive transformer config
     n_prelude=n_prelude, n_recur_block=n_recur_block, n_coda=n_coda,
     fixed_k=fixed_k, bptt_k=bptt_k,
+    gradient_checkpointing=gradient_checkpointing,
 )
 with torch.device("meta"):
     model_config = GPTConfig(**model_config_kwargs)
@@ -391,14 +393,15 @@ while True:
     if step > 10:
         total_training_time += dt # only count the time after the first 10 steps
     print_grad_norm = f" grad norm: {grad_norm:.4f} |" if grad_clip_enabled else ""
-    print0(f"step {step:05d}/{num_iterations:05d} ({pct_done:.2f}%) | loss: {debiased_smooth_loss:.6f} | gate: {train_gate_cost.item():.2f} | λ: {lambda_t:.2e} |{print_grad_norm} lrm: {lrm:.2f} | dt: {dt * 1000:.2f}ms | tok/sec: {tok_per_sec:,} | mfu: {mfu:.2f} | total time: {total_training_time/60:.2f}m")
+    gate_mean = train_gate_cost.item() / (device_batch_size * max_seq_len * fixed_k)
+    print0(f"step {step:05d}/{num_iterations:05d} ({pct_done:.2f}%) | loss: {debiased_smooth_loss:.6f} | gate: {gate_mean:.4f} | λ: {lambda_t:.2e} |{print_grad_norm} lrm: {lrm:.2f} | dt: {dt * 1000:.2f}ms | tok/sec: {tok_per_sec:,} | mfu: {mfu:.2f} | total time: {total_training_time/60:.2f}m")
     if step % 100 == 0:
         log_data = {
             "step": step,
             "total_training_flops": flops_so_far,
             "total_training_time": total_training_time,
             "train/loss": debiased_smooth_loss,
-            "train/gate_cost": train_gate_cost.item(),
+            "train/gate_mean": gate_mean,
             "train/lambda_gate": lambda_t,
             "train/lrm": lrm,
             "train/dt": dt,
