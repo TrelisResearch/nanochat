@@ -197,3 +197,23 @@ Branch: `gated-recursive`. Pod: `qw9z4xqf03fcwx`, 8×A100, $11.92/hr.
 - Pod started ~16:20 UTC 2026-03-19, initialising optimizer/compile
 - Results TBD
 
+---
+
+# Architecture Improvement Ideas
+
+## Step 11: Gate conditioned on u-s (proposed)
+
+**Current design:** `g = sigmoid(gate_proj(s))` — gate sees only the current state.
+
+**Question it answers:** "Is my state the kind of state that benefits from more recurrence?"
+
+**Proposed alternative:** `g = sigmoid(gate_proj(u - s))` or a combination `g = sigmoid(gate_proj(cat(s, u-s)))`
+
+**Motivation:** `u-s` is the proposed update magnitude — a direct convergence signal. Small `||u-s||` means the recurrence step would change the state very little, i.e. the state has converged. The gate currently has to *learn* to infer convergence from `s` alone, which requires gate_proj to approximate a complex nonlinear function of `s`. Passing `u-s` directly hands the convergence signal to the gate.
+
+**Why `s` alone is theoretically sufficient but practically harder:** Since `u = recur(inject(cat(e, s)))` is a deterministic function of `s`, the convergence signal is in principle derivable from `s`. But learning that mapping is a harder optimisation problem than reading it off `u-s` directly.
+
+**The hybrid:** `gate_proj(cat(s, u-s))` combines the neural "what kind of state am I in" (from `s`) with the direct "how much am I still changing" (from `u-s`). The neural part learns what scale of update means convergence for this model; `u-s` provides the directional/magnitude signal.
+
+**Tradeoff:** Requires running the recur blocks before deciding whether to apply the update — can't early-exit without computing `u` first. Currently `g` is computed before `u`, so a gate=0 token skips the recur computation entirely. With `u-s` gating, you always pay the recur cost. This eliminates the inference speedup benefit unless you use a cheap proxy for `u-s`.
+
