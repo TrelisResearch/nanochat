@@ -37,7 +37,6 @@ class GPTConfig:
     n_coda: int = 2  # number of coda layers
     fixed_k: int = 4  # fixed number of recurrences during training and inference
     gate_threshold: float = 0.01  # early-exit: break when max gate value falls below this (inference only)
-    gradient_checkpointing: bool = False  # if True, recompute recur block activations in backward instead of storing them
     recur_warm_start: bool = True  # warm-start recurrence from previous token's final state
     bptt_k: int = 4  # truncate backprop to last k recurrences (None = full backprop)
     kv_cache_recur_budget: int = 1  # KV cache slots per position for recurrence (1 = only store final)
@@ -338,7 +337,7 @@ class GPT(nn.Module):
             warm_start_state: Optional warm-start state from previous forward pass (B, T, n_embd)
 
         Returns:
-            If targets is not None: (loss, gate_cost) where gate_cost = sum of all gate values
+            If targets is not None: (loss, gate_mean) where gate_mean in [0,1] = avg gate openness across B×T×K
             Else: (logits, final_recur_state) where final_recur_state can be used for warm-start
         """
         B, T = idx.size()
@@ -378,12 +377,7 @@ class GPT(nn.Module):
         # When g≈1 (open): full update. When g≈0 (closed): recursion is a no-op.
         # At inference: early exit when all gates close below gate_threshold.
         gate_cost = torch.tensor(0.0, device=idx.device)
-        # Define once outside the loop; cos/sin passed explicitly so checkpoint machinery tracks them
-        def _recur_fn(s_inp, e_inp, cos, sin):
-            u = self.inject(torch.cat([e_inp, s_inp], dim=-1))
-            for blk in self.transformer.recur:
-                u = blk(u, (cos, sin), None)
-            return u
+        B, T = idx.shape
         for i in range(num_recur):
             # Compute gate from current state (before this recursion step)
             g = torch.sigmoid(self.gate_proj(s))  # [B, T, 1]
@@ -391,19 +385,17 @@ class GPT(nn.Module):
             if kv_cache is not None and g.max().item() < self.config.gate_threshold:
                 break
             # Run recur blocks: u = recur(inject(concat(e, s)))
-            if self.config.gradient_checkpointing and kv_cache is None and torch.is_grad_enabled():
-                cos, sin = cos_sin
-                u = torch.utils.checkpoint.checkpoint(_recur_fn, s, e, cos, sin, use_reentrant=False)
-            else:
-                u = self.inject(torch.cat([e, s], dim=-1))
-                for block in self.transformer.recur:
-                    u = block(u, cos_sin, kv_cache)
+            u = self.inject(torch.cat([e, s], dim=-1))
+            for block in self.transformer.recur:
+                u = block(u, cos_sin, kv_cache)
             # Gated state update
             s = s + g * (u - s)
             gate_cost = gate_cost + g.sum()
             # Truncated BPTT: detach gradients for early recurrences
             if self.config.bptt_k is not None and i < num_recur - self.config.bptt_k:
                 s = s.detach()
+        # Normalise: gate_mean = average gate openness in [0, 1] across all tokens and recur steps
+        gate_cost = gate_cost / (B * T * num_recur)
 
         # 5. Coda blocks (run once)
         x = s
@@ -414,7 +406,7 @@ class GPT(nn.Module):
         # Forward the lm_head (compute logits)
         softcap = 15
         if targets is not None:
-            # training mode: return (loss, gate_cost) for gated loss = CE + λ * gate_cost
+            # training mode: return (loss, gate_mean) where gate_mean in [0,1] = avg gate openness
             logits = self.lm_head(x)
             logits = softcap * torch.tanh(logits / softcap) # logits softcap
             logits = logits.float() # use tf32/fp32 for logits

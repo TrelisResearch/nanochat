@@ -51,7 +51,6 @@ dry_run = 0 # dry_run=1 is for experiments: we will log to wandb but we won't wr
 # Gated recursion config
 lambda_gate = 1e-3 # sparsity penalty weight on total gate activation
 gate_warmup_ratio = 0.2 # fraction of training where λ=0 (gates stay open while block learns)
-gradient_checkpointing = True
 config_keys = [k for k,v in globals().items() if not k.startswith('_') and isinstance(v, (int, float, bool, str))]
 exec(open(os.path.join('nanochat', 'configurator.py')).read()) # overrides from command line or config file
 user_config = {k: globals()[k] for k in config_keys} # possibly useful for logging
@@ -75,7 +74,6 @@ pretrain_batch_size = meta.get("device_batch_size", None)
 if pretrain_batch_size is not None and device_batch_size > pretrain_batch_size:
     print0(f"FOOTGUN WARNING: base model training used device_batch_size {pretrain_batch_size}, did you pass in a good --device_batch_size to this script?")
 orig_model = model
-orig_model.config.gradient_checkpointing = gradient_checkpointing
 model = torch.compile(model, dynamic=False)
 depth = model.config.n_layer
 num_flops_per_token = model.estimate_flops()
@@ -252,7 +250,7 @@ while True:
     lambda_t = get_lambda_t(progress)
     for micro_step in range(grad_accum_steps):
         with autocast_ctx:
-            ce_loss, gate_cost = model(x, y)  # fixed_k recurrences, returns (CE loss, gate activation sum)
+            ce_loss, gate_cost = model(x, y)  # fixed_k recurrences, returns (CE loss, gate_mean in [0,1])
         gated_loss = ce_loss + lambda_t * gate_cost
         train_loss = ce_loss.detach()
         train_gate_cost = gate_cost.detach()
@@ -289,7 +287,7 @@ while True:
     mfu = 100 * flops_per_sec / promised_flops_per_sec_h100 # in %
     if step > 10:
         total_training_time += dt # only count the time after the first 10 steps
-    gate_mean = train_gate_cost.item() / (device_batch_size * max_seq_len * orig_model.config.fixed_k)
+    gate_mean = train_gate_cost.item()  # already normalised in model forward
     print0(f"step {step:05d} ({pct_done:.2f}%) | loss: {debiased_smooth_loss:.6f} | gate: {gate_mean:.4f} | λ: {lambda_t:.2e} | lrm: {lrm:.2f} | dt: {dt * 1000:.2f}ms | tok/sec: {tok_per_sec:,} | mfu: {mfu:.2f} | total time: {total_training_time/60:.2f}m")
     if step % 10 == 0:
         wandb_run.log({
