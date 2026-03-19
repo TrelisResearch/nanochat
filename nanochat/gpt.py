@@ -392,8 +392,8 @@ class GPT(nn.Module):
             g_eff = gate_scale * g + (1.0 - gate_scale)  # i=0 → g_eff=1; i>0 → g_eff=g
             s = s + g_eff * (u - s)
             gate_cost = gate_cost + gate_scale * g.sum()  # always a tensor op, 0 at step 0
-            # Inference early exit for gated steps (training: kv_cache is None, never fires)
-            if i > 0 and kv_cache is not None and g.max().item() < self.config.gate_threshold:
+            # Inference early exit (training: kv_cache is None, never fires)
+            if kv_cache is not None and g.max().item() < self.config.gate_threshold:
                 break
             # Truncated BPTT: detach gradients for early recurrences
             if self.config.bptt_k is not None and i < num_recur - self.config.bptt_k:
