@@ -192,8 +192,7 @@ def main():
         "dockerStartCmd": ["bash", "-c", TRAIN_CMD],
     }
 
-    print(f"Launching '{args.name}': continued pre-train+mid+SFT on {args.gpus}×H100")
-    print(f"NOTE: Data download will take ~1-2hrs before training starts.")
+    print(f"Launching '{args.name}': pre-train+mid+SFT on {args.gpus}×{args.gpu_type[0] if hasattr(args, 'gpu_type') else 'GPU'}")
     result = create_pod(api_key, pod_config, dry_run=args.dry_run)
     if result:
         print(f"Pod created: id={result.get('id')}  cost=${result.get('costPerHr')}/hr")
