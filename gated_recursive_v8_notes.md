@@ -199,6 +199,30 @@ Branch: `gated-recursive`. Pod: `qw9z4xqf03fcwx`, 8×A100, $11.92/hr.
 
 ---
 
+# Gated Recursive Training — v11 Run Notes
+Date: 2026-03-19 (active)
+
+## What we ran
+Full Chinchilla pipeline from scratch: base_train → mid_train → chat_sft.
+Branch: `gated-recursive`. Pod: `ng5pqtr3vrlhcq`, 8×A100, $11.92/hr.
+Same hyperparams as v10 (`target_param_data_ratio=20`, `lambda_gate=1e-3`, etc.) but with architectural fixes to the gate design.
+
+## Changes vs v10
+
+| Fix | Detail |
+|-----|--------|
+| `norm(u-s)` gate input | Raw `u-s` caused hard saturation (sigmoid→1.6e-15) after first Muon step on inject. inject=[I|0] init + zero c_proj means u-s=0 at init; after one Muon update inject changes by O(1), making u-s a large unscaled vector. `norm(u-s)` keeps gate input bounded (RMS≈1) throughout training. norm(0)=0 preserves sigmoid(bias)=0.88 at init. |
+| Forced step-0 uses scalar multipliers | `gate_scale=0.0 if i==0 else 1.0` instead of `torch.ones_like` conditional. Functionally equivalent but uniform tensor ops across loop iterations. |
+| Early exit from step 0 | Removed `i>0` guard from inference exit check. Model can now exit after a single recurrence at inference (minimum 1, not 2). gate_cost penalty unaffected (still excluded at step 0 via gate_scale=0). |
+
+## Previous v11 pods (killed)
+- `5ex219xmt2pu56`: gate_mean collapsed to ~1.6e-15 at step 2. Caused by unsaturated gate_proj input after first Muon step — fixed by norm(u-s).
+
+## Status
+- Pod started 2026-03-19, results TBD
+
+---
+
 # Architecture Improvement Ideas
 
 Two candidates for step 11:
