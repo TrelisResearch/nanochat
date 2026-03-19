@@ -137,3 +137,63 @@ a gateway quirk with non-interactive sessions on this machine. Worth investigati
 ## Cost summary
 - v8 pod: ~11 min training time × $21.52/hr ≈ **~$4** for mid+SFT
 - All v1–v7 debugging costs were dominated by provisioning/crash overhead, not training time
+
+---
+
+# Gated Recursive Training — v9b Run Notes
+Date: 2026-03-19
+
+## What we ran
+Full pipeline from scratch: base_train → mid_train → chat_sft.
+Branch: `gated-recursive`. Pod: `doirbu3jdewmdv`, 8×A100 SXM4, $11.92/hr.
+`target_param_data_ratio=5` (~20% Chinchilla), `warmdown_ratio=0.3`, `lambda_gate=1e-3`, `gate_warmup_ratio=0.2`.
+
+## Changes vs v8
+- Train from scratch (no `--load_pretrained`) — fixes pre-training mismatch
+- gate_cost normalised to gate_mean (÷ B×T×K) in model forward — λ=1e-3 now interpretable as nats/unit gate openness
+- Gradient checkpointing removed — N/4 layers × 4 recur steps ≈ same activation memory as master
+- Variable-K workarounds removed from mid_train (cache_size_limit=64, commented compile)
+- SSH fix: `/start.sh &` + `sleep 15` at top of TRAIN_CMD
+
+## Training results
+- base_train completed: ~57 min, final loss ~3.15 nats
+- mid_train + chat_sft completed; pushed to `Trelis/nanochat-gated-recursive` (base/d20, sft/d20)
+- Total cost: ~2.5hr × $11.92/hr ≈ **~$30**
+
+## Gate analysis
+- gate_mean settled at ~0.09–0.10 during warmup and stayed there throughout
+- Did not collapse to zero (unlike v8 where gates pegged at max)
+- Did not become selective — no differentiation between easy/hard tokens
+- λ ramps the entire last 80% of the 3131-step run, never plateauing at full strength
+- Root cause: `target_param_data_ratio=5` too short — recurrence never had enough training to become CE-useful
+
+## Bugs fixed
+| Issue | Fix |
+|-------|-----|
+| λ=1e-3 collapsed gates instantly (gate penalty ~14× CE) | gate_cost was raw sum; normalised to gate_mean in model forward |
+| Gradient checkpointing overhead (~33%) unnecessary | Removed — activation memory comparable to master without it |
+| Container restarts after script completes | Added self-terminate: `curl -X DELETE .../pods/${RUNPOD_POD_ID}` at end of TRAIN_CMD |
+| mid/sft unnecessarily ramp λ from 0 | Set `gate_warmup_ratio=0.0` for mid+sft (gates already trained) |
+
+## Recommendations for v10
+1. `target_param_data_ratio=20` — full Chinchilla, 12,525 steps (4× more than v9b)
+2. `warmdown_ratio=0.2` — match master
+3. `gate_warmup_ratio=0.0` for mid+sft
+4. Watch gate_mean trajectory during warmup — if it rises from 0.09 as recurrence becomes useful, that's the signal we want
+5. If gate_mean stays stuck at 0.09 all through warmup even in v10: try freezing gate_proj during warmup so recur blocks learn against open gates before λ kicks in (increasing bias init won't help — equilibrium is set by CE gradient)
+
+---
+
+# Gated Recursive Training — v10 Run Notes
+Date: 2026-03-19 (active)
+
+## What we ran
+Full Chinchilla pipeline from scratch: base_train → mid_train → chat_sft.
+Branch: `gated-recursive`. Pod: `qw9z4xqf03fcwx`, 8×A100, $11.92/hr.
+`target_param_data_ratio=20`, `warmdown_ratio=0.2`, `lambda_gate=1e-3`, `gate_warmup_ratio=0.2` (base), `gate_warmup_ratio=0.0` (mid+sft).
+12,525 steps base_train, ~8–9hr total. ETA ~$95–110.
+
+## Status
+- Pod started ~16:20 UTC 2026-03-19, initialising optimizer/compile
+- Results TBD
+
