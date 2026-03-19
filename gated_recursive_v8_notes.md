@@ -229,3 +229,44 @@ For step 0, `s = u` always (no gate). For steps 1+, `g = sigmoid(gate_proj(u - s
 
 This is now the default implementation (combined with Option B).
 
+---
+
+# Key Design Insights (v11 discussion)
+
+## Gate mechanics summary
+
+- `g` is a per-token scalar in (0,1), recomputed fresh at each recurrence step — not one value shared across all steps
+- Step 0: always `s = u` (forced full update, g=1). Steps 1+: `g = sigmoid(gate_proj(u - s))`
+- At **inference**: step 0 always runs; after each subsequent step, if `g.max() < gate_threshold` exit early
+- At **training**: no early exit (gate_threshold has zero effect); all K steps always run; gradient to recur blocks scaled by `g`
+- `gate_threshold=0.01` is inference-only, tunable post-training as speed/quality tradeoff
+- `gate_mean` is normalised over steps 1..(K-1) only (step 0 not counted, always open)
+
+## Why gradient scaling matters
+
+Even with forced step 0, steps 1-3 receive gradients scaled by `g`. If `g ≈ 0.09`, recur blocks learn at ~9% gradient magnitude for those steps. The forced step 0 breaks the chicken-and-egg for the first recurrence but steps 1+ still face weaker gradients until recurrence becomes demonstrably useful.
+
+## Baseline: recursive (from scratch, no gating)
+
+All recursive results are from-scratch training, not continued fine-tuning:
+
+| Metric | d20 | r=2 | r=4 | r=8 | r=16 |
+|--------|-----|-----|-----|-----|------|
+| ARC-Easy | 0.4630 | 0.4141 | 0.4306 | 0.4423 | 0.4381 |
+| ARC-Challenge | 0.3234 | 0.3063 | 0.3114 | 0.3106 | 0.3123 |
+| MMLU | 0.3222 | 0.3119 | 0.3158 | 0.3185 | 0.3179 |
+| GSM8K | 0.0508 | 0.0356 | 0.0614 | 0.0599 | 0.0644 |
+| HumanEval | 0.1220 | 0.0793 | 0.0793 | 0.0915 | 0.0793 |
+| SpellingBee | 0.9883 | 0.9844 | 0.9883 | 0.9883 | 0.9844 |
+| ChatCORE | 0.2732 | 0.2459 | 0.2566 | 0.2614 | 0.2588 |
+
+Recursion (uncontrolled, r=4) hurts on most tasks but helps on GSM8K — shared weights have lower representational capacity than unique layers, except for multi-step reasoning where recurrence adds value.
+
+## Right success metric for gated model
+
+The goal is **not** to beat d20 overall (fewer unique weights makes that unlikely). The goal is to show **gate_mean correlates with task difficulty**:
+- Hard reasoning tasks (GSM8K, HumanEval) → higher gate_mean (model wants more recurrences)
+- Simple tasks (SpellingBee, easy ARC) → lower gate_mean (model exits early)
+
+If this signal is present, the architecture is demonstrating dynamic compute allocation — a meaningful research result independent of aggregate benchmark scores. Follow-on: log gate_mean **per eval task** rather than just globally.
+
