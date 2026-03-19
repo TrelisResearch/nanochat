@@ -201,19 +201,19 @@ Branch: `gated-recursive`. Pod: `qw9z4xqf03fcwx`, 8×A100, $11.92/hr.
 
 # Architecture Improvement Ideas
 
-## Step 11: Gate conditioned on u-s (proposed)
+Two candidates for step 11:
 
-**Current design:** `g = sigmoid(gate_proj(s))` — gate sees only the current state.
+## Option A: Freeze gate_proj during λ warmup
 
-**Question it answers:** "Is my state the kind of state that benefits from more recurrence?"
+Don't allow gate_proj to update until λ kicks in. This keeps gates open during warmup so recur blocks learn against a consistent open-gate input distribution, before gating pressure is applied. Pending v10 results — if gate_mean stays stuck at ~0.09 all through warmup, this is the fix.
 
-**Proposed alternative:** `g = sigmoid(gate_proj(u - s))` or a combination `g = sigmoid(gate_proj(cat(s, u-s)))`
+## Option B: Gate conditioned on u-s instead of s
 
-**Motivation:** `u-s` is the proposed update magnitude — a direct convergence signal. Small `||u-s||` means the recurrence step would change the state very little, i.e. the state has converged. The gate currently has to *learn* to infer convergence from `s` alone, which requires gate_proj to approximate a complex nonlinear function of `s`. Passing `u-s` directly hands the convergence signal to the gate.
+**Current:** `g = sigmoid(gate_proj(s))` — always do recurrence first, then gate decides whether to do *another* based on current state.
 
-**Why `s` alone is theoretically sufficient but practically harder:** Since `u = recur(inject(cat(e, s)))` is a deterministic function of `s`, the convergence signal is in principle derivable from `s`. But learning that mapping is a harder optimisation problem than reading it off `u-s` directly.
+**Proposed:** `g = sigmoid(gate_proj(u - s))` — after each recurrence, gate looks at the update `u-s` to decide whether to do another. Small `u-s` means the state barely changed → converged → close gate.
 
-**The hybrid:** `gate_proj(cat(s, u-s))` combines the neural "what kind of state am I in" (from `s`) with the direct "how much am I still changing" (from `u-s`). The neural part learns what scale of update means convergence for this model; `u-s` provides the directional/magnitude signal.
+This is more natural: always do at least one recurrence, then after each step decide whether another is warranted based on how much the state just changed. The model learns what scale of `u-s` means "done". Also likely better for training stability since at least one recurrence always fires.
 
-**Tradeoff:** Requires running the recur blocks before deciding whether to apply the update — can't early-exit without computing `u` first. Currently `g` is computed before `u`, so a gate=0 token skips the recur computation entirely. With `u-s` gating, you always pay the recur cost. This eliminates the inference speedup benefit unless you use a cheap proxy for `u-s`.
+**Tradeoff:** Can't skip computing `u` before deciding — always pays at least one recur cost. Current design can skip all recur computation when gate=0.
 
