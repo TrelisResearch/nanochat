@@ -383,17 +383,18 @@ class GPT(nn.Module):
             u = self.inject(torch.cat([e, s], dim=-1))
             for block in self.transformer.recur:
                 u = block(u, cos_sin, kv_cache)
-            # Compute gate (always, even for step 0 — needed for torch.compile)
-            g = torch.sigmoid(self.gate_proj(u - s))  # [B, T, 1]
-            # Step 0: force g_eff=1 (full update); steps 1+: use learned gate
-            g_eff = torch.ones_like(g) if i == 0 else g
-            # Inference early exit (steps 1+ only, training never hits this)
+            # norm(u-s) stabilises the gate signal: keeps input magnitude bounded after Muon
+            # updates inject away from [I|0] init; norm(0)=0 so init behaviour is unchanged.
+            g = torch.sigmoid(self.gate_proj(norm(u - s)))  # [B, T, 1]
+            # Scalar multipliers resolved at trace time (i is a Python int) — no tensor branches.
+            # step 0: gate_scale=0 (forced full update, not penalised); steps 1+: gate_scale=1
+            gate_scale = 0.0 if i == 0 else 1.0
+            g_eff = gate_scale * g + (1.0 - gate_scale)  # i=0 → g_eff=1; i>0 → g_eff=g
+            s = s + g_eff * (u - s)
+            gate_cost = gate_cost + gate_scale * g.sum()  # always a tensor op, 0 at step 0
+            # Inference early exit for gated steps (training: kv_cache is None, never fires)
             if i > 0 and kv_cache is not None and g.max().item() < self.config.gate_threshold:
                 break
-            s = s + g_eff * (u - s)
-            # Accumulate gate cost for gated steps only (step 0 is forced, not penalised)
-            if i > 0:
-                gate_cost = gate_cost + g.sum()
             # Truncated BPTT: detach gradients for early recurrences
             if self.config.bptt_k is not None and i < num_recur - self.config.bptt_k:
                 s = s.detach()

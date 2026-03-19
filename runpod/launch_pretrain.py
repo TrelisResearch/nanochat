@@ -8,7 +8,7 @@ data shards + reuses tokenizer from Trelis/nanochat-recursive.
 Workflow on the pod:
   1. Pull tokenizer from Trelis/nanochat-recursive HF repo
   2. Download pre-training data shards (~24GB)
-  3. base_train from scratch with gated loss (target_param_data_ratio=5, ~20% Chinchilla)
+  3. base_train from scratch with gated loss (target_param_data_ratio=20, ~Chinchilla)
   4. Push base checkpoint to HF
   5. mid_train → chat_sft → push to HF
 
