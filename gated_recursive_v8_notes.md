@@ -258,21 +258,41 @@ Date: 2026-03-19 (active)
 Same as v12 but with `lambda_gate=1e-2` (10× larger). Testing whether stronger λ can push gates off 1.0 and create token-level selectivity.
 Pod: `4a25jrpxvljhjz`, 8×H100, $21.52/hr.
 
-## Key question
-Does gate_mean drop below 1.0 after warmup, and does it differentiate by task difficulty at eval?
+## Results
+Pod killed early after confirming gate dynamics. gate_mean dropped to steady **~0.667** after λ ramp — exactly 2/3, consistent with one of three gated steps closing uniformly across all tokens.
 
-## Status
-- Provisioning 2026-03-19, results TBD
+**0.667 is suspiciously round:** with fixed_k=4 (3 gated steps), 2/3 open = 0.667. But the value is uniform across all tokens/positions, indicating the **bias is dominating** — the model found a global equilibrium where sigmoid(bias) = 0.667 rather than learning per-token selectivity. Weight contribution (which would create token-specific variation) is negligible.
+
+This is λ and bias finding a lazy global equilibrium, not dynamic compute allocation.
+
+**λ calibration:** one recurrence estimated worth ~0.01 nats val loss. λ=1e-2 is right at the boundary — consistent with one step closing. λ is correctly sized but the bias scalar is preventing per-token differentiation.
 
 ---
 
-## Notes on soft vs hard gating
+## Notes on bias and global equilibrium
 
-**Soft gating** (`s = s + g*(u-s)`): recur always runs, update scaled by g. CE always sees some benefit from every recurrence step, so gradient toward g=0 is weak. Gradient also vanishes near g=0 and g=1 (g*(1-g)→0).
+With a trainable bias, `gate = sigmoid(weight @ norm(u-s) + bias)`. When weight is small, bias dominates and gate is nearly identical for all tokens. λ pushes bias to a global equilibrium (0.667 here) rather than forcing per-token decisions.
 
-**Hard gating** (straight-through): binary decision per token, cleaner CE signal. But in batched training you still run recur for all tokens and mask output — no compute savings, and gradient signal is nearly identical with straight-through. Real savings only at inference when whole batch exits early (already handled by `g.max() < threshold`). Not a big architectural difference in practice.
+**Fix for v14: remove gate_proj bias.** Without bias, `gate = sigmoid(weight @ norm(u-s))` — must be token-specific from the start, no global scalar to lean on. Initialises at sigmoid(0)=0.5 but since gate_proj is frozen during warmup this doesn't matter. λ=1e-2 stays correct (same nats threshold argument applies).
 
-**If v13 also pins at 1.0:** the lever is λ strength, not soft vs hard gating. Next step would be λ=1e-1 or rethinking whether dynamic gating from pre-training is achievable with this architecture.
+---
+
+# Gated Recursive Training — v14 Plan
+Date: 2026-03-20 (planned)
+
+## Changes vs v13
+- Remove `gate_proj` bias (`bias=False` in `nn.Linear`)
+- Keep λ=1e-2, all other settings unchanged
+
+## Expected behaviour
+- gate_mean at init ≈ 0.5 (sigmoid(0)), but frozen during warmup so irrelevant
+- After unfreeze: gate must learn token-specific patterns via weight, no global bias escape
+- λ=1e-2 should drive per-token selectivity rather than uniform global equilibrium
+
+## Launch command
+```bash
+uv run runpod/launch_pretrain.py --version v14 --lambda-gate 1e-2 --name nanochat-gated-v14
+```
 
 ---
 

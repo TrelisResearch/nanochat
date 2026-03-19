@@ -71,14 +71,7 @@ def test_model_has_gate_proj():
     import torch.nn as nn
     assert isinstance(model.gate_proj, nn.Linear)
     assert model.gate_proj.weight.shape == (1, model.config.n_embd)
-    assert model.gate_proj.bias is not None
-
-
-def test_gate_bias_init():
-    """gate_proj.bias should be +2.0 so gates start open (sigmoid(2) ≈ 0.88)."""
-    model = make_model()
-    bias_val = model.gate_proj.bias.item()
-    assert abs(bias_val - 2.0) < 1e-5, f"gate_proj.bias should be 2.0, got {bias_val}"
+    assert model.gate_proj.bias is None, "gate_proj must have no bias (bias=False forces per-token selectivity)"
 
 
 # ---------------------------------------------------------------------------
@@ -181,34 +174,28 @@ def test_num_recur_override_runs_without_error():
 # ---------------------------------------------------------------------------
 
 def test_zero_gate_produces_near_identity_update():
-    """When gate ≈ 0, s = s + 0 * (u - s) = s_init (no state change)."""
+    """With fixed_k=1 (only forced step-0), gate_cost is always 0 regardless of gate weights."""
     model = make_model(make_config(fixed_k=1))
     set_inference_mode(model)
-    with torch.no_grad():
-        model.gate_proj.weight.zero_()
-        model.gate_proj.bias.fill_(-100.0)  # sigmoid(-100) ≈ 0
     B, T = 1, 4
     idx = torch.randint(0, 256, (B, T))
     logits, s = model(idx)
     assert s.shape == (B, T, model.config.n_embd)
-    # gate_cost should be ~0 since all gates are closed
+    # gate_cost should be 0: only step-0 runs (forced, not penalised)
     _, gate_cost = model(idx, torch.randint(0, 256, (B, T)))
-    assert gate_cost.item() < 1e-3, f"gate_cost should be ~0 with closed gates, got {gate_cost.item()}"
+    assert gate_cost.item() < 1e-6, f"gate_cost should be 0 with fixed_k=1, got {gate_cost.item()}"
 
 
 def test_open_gate_produces_nonzero_gate_cost():
-    """When gate ≈ 1, state is fully updated and gate_cost is large."""
+    """With fixed_k=2 (one gated step), gate_cost should be positive with any non-trivial weights."""
     model = make_model(make_config(fixed_k=2))
     set_inference_mode(model)
-    with torch.no_grad():
-        model.gate_proj.weight.zero_()
-        model.gate_proj.bias.fill_(100.0)  # sigmoid(100) ≈ 1
     B, T = 1, 4
     idx = torch.randint(0, 256, (B, T))
     targets = torch.randint(0, 256, (B, T))
     _, gate_cost = model(idx, targets)
-    # gate_mean is normalised to [0,1]; with sigmoid(100) ≈ 1, gate_mean ≈ 1.0
-    assert gate_cost.item() > 0.9, f"gate_mean should be ~1.0 with open gates, got {gate_cost.item()}"
+    # gate_mean is normalised to [0,1]; sigmoid output is always > 0
+    assert gate_cost.item() > 0.0, f"gate_mean should be > 0 with fixed_k=2, got {gate_cost.item()}"
 
 
 # ---------------------------------------------------------------------------
@@ -216,15 +203,16 @@ def test_open_gate_produces_nonzero_gate_cost():
 # ---------------------------------------------------------------------------
 
 def test_gradients_flow_through_gate():
-    """gate_proj.bias must receive a non-zero gradient during training.
+    """gate_proj.weight must receive a non-zero gradient when u-s is non-trivial.
 
-    With the u-s gate design, gate_proj.weight.grad is zero at random init because u≈s
-    (recur blocks with random weights produce u≈s).  The bias gradient is always non-zero
-    and carries the initial learning signal; weight gradients become non-zero once
-    representations diverge during training.
+    At exact init, inject=[I|0]+c_proj=0 gives u-s=0 so weight.grad=0. We perturb
+    inject to break this degeneracy before testing gradient flow.
     """
     model = make_model()
     model.train()
+    with torch.no_grad():
+        # break inject=[I|0] degeneracy so u != s and weight grad is non-zero
+        model.inject.weight.add_(torch.randn_like(model.inject.weight) * 0.1)
     B, T = 2, 8
     idx = torch.randint(0, 256, (B, T))
     targets = torch.randint(0, 256, (B, T))
@@ -232,21 +220,22 @@ def test_gradients_flow_through_gate():
     total_loss = loss + 1e-3 * gate_cost
     total_loss.backward()
     assert model.gate_proj.weight.grad is not None, "gate_proj.weight should have gradient tensor"
-    assert model.gate_proj.bias.grad is not None, "gate_proj.bias should have gradient"
-    assert model.gate_proj.bias.grad.abs().item() > 0, "gate_proj.bias gradient should be non-zero"
+    assert model.gate_proj.weight.grad.abs().sum().item() > 0, "gate_proj.weight gradient should be non-zero"
 
 
-def test_gate_cost_grad_flows_to_bias():
-    """gate_cost must be differentiable w.r.t. gate_proj.bias."""
+def test_gate_cost_grad_flows_to_weight():
+    """gate_cost must be differentiable w.r.t. gate_proj.weight when u-s is non-trivial."""
     model = make_model()
     model.train()
+    with torch.no_grad():
+        model.inject.weight.add_(torch.randn_like(model.inject.weight) * 0.1)
     B, T = 2, 8
     idx = torch.randint(0, 256, (B, T))
     targets = torch.randint(0, 256, (B, T))
     _, gate_cost = model(idx, targets)
     gate_cost.backward()
-    assert model.gate_proj.bias.grad is not None
-    assert model.gate_proj.bias.grad.abs().item() > 0
+    assert model.gate_proj.weight.grad is not None
+    assert model.gate_proj.weight.grad.abs().sum().item() > 0
 
 
 def test_bptt_truncation_does_not_break_gradients():
@@ -283,18 +272,16 @@ def test_setup_optimizers_covers_all_params():
 
 
 def test_gate_proj_in_optimizers():
-    """gate_proj weight and bias must both be covered by an optimizer."""
+    """gate_proj weight must be covered by an optimizer (no bias — bias=False)."""
     model = make_model()
     optimizers = model.setup_optimizers()
     gate_weight_id = id(model.gate_proj.weight)
-    gate_bias_id = id(model.gate_proj.bias)
     opt_param_ids = set()
     for opt in optimizers:
         for group in opt.param_groups:
             for p in group["params"]:
                 opt_param_ids.add(id(p))
     assert gate_weight_id in opt_param_ids, "gate_proj.weight not in any optimizer"
-    assert gate_bias_id in opt_param_ids, "gate_proj.bias not in any optimizer"
 
 
 # ---------------------------------------------------------------------------

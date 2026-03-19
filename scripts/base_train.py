@@ -152,10 +152,7 @@ if load_pretrained:
     missing, unexpected = model.load_state_dict(pretrained_state, strict=False, assign=True)
     print0(f"  Missing keys (new params): {missing}")
     print0(f"  Unexpected keys (dropped): {unexpected}")
-    # Re-init gate bias to +2 (sigmoid≈0.88) so gates start open after loading
-    with torch.no_grad():
-        model.gate_proj.bias.fill_(2.0)
-    print0("  gate_proj.bias re-initialized to +2.0 (gates start open)")
+    # gate_proj has no bias — no re-init needed
 
 # If resuming from a gated-recursive checkpoint, overwrite the model parameters
 resuming = resume_from_step != -1

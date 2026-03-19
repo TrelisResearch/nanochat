@@ -163,9 +163,9 @@ class GPT(nn.Module):
         })
         # Input injection adapter: concat(e, s) -> linear -> u
         self.inject = nn.Linear(2 * config.n_embd, config.n_embd, bias=False)
-        # Gate projection: scalar gate per token controlling how much each recursion updates state
-        # g = sigmoid(gate_proj(s)) in [0,1]; s = s + g * (u - s)
-        self.gate_proj = nn.Linear(config.n_embd, 1, bias=True)
+        # Gate projection: scalar gate per token; no bias so gate must be token-specific
+        # (bias would allow a global equilibrium, preventing per-token selectivity)
+        self.gate_proj = nn.Linear(config.n_embd, 1, bias=False)
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
         # To support meta device initialization, we init the rotary embeddings here, but it's fake
         # As for rotary_seq_len, these rotary embeddings are pretty small/cheap in memory,
@@ -193,9 +193,7 @@ class GPT(nn.Module):
         with torch.no_grad():
             self.inject.weight.zero_()
             self.inject.weight[:, :n_embd].copy_(torch.eye(n_embd))
-        # Initialize gate bias to +2.0 so sigmoid(+2) ≈ 0.88: gates start open
-        # This lets the recurrent block learn useful representations before efficiency pressure
-        torch.nn.init.constant_(self.gate_proj.bias, 2.0)
+        # gate_proj has no bias — forces token-specific gating via weight only
         # init the rotary embeddings
         head_dim = self.config.n_embd // self.config.n_head
         cos, sin = self._precompute_rotary_embeddings(self.rotary_seq_len, head_dim)
@@ -253,7 +251,7 @@ class GPT(nn.Module):
 
             # Params used r times per forward (inside recurrence loop)
             inject_params = self.inject.weight.numel()
-            gate_params = self.gate_proj.weight.numel() + self.gate_proj.bias.numel()
+            gate_params = self.gate_proj.weight.numel()
             recur_params = sum(p.numel() for p in self.transformer.recur.parameters())
             r_times_params = inject_params + gate_params + recur_params
 
