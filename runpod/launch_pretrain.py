@@ -40,6 +40,7 @@ def load_env():
 
 TRAIN_CMD = textwrap.dedent("""\
     set -euo pipefail
+    /usr/sbin/sshd  # start SSH daemon so we can monitor remotely
     exec > >(tee /tmp/train.log) 2>&1
     export PIP_ROOT_USER_ACTION=ignore
 
