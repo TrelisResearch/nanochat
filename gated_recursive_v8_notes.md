@@ -219,7 +219,27 @@ Same hyperparams as v10 (`target_param_data_ratio=20`, `lambda_gate=1e-3`, etc.)
 - `5ex219xmt2pu56`: gate_mean collapsed to ~1.6e-15 at step 2. Caused by unsaturated gate_proj input after first Muon step — fixed by norm(u-s).
 
 ## Status
-- Pod started 2026-03-19, results TBD
+- Pod killed early — gate_mean collapsed to ~1e-24 within first few hundred steps
+- Root cause: CE gradient consistently drives gate_proj.bias negative before recur has learned anything useful (recur hasn't adapted yet → random u-s updates hurt CE → model prefers gates closed). norm(u-s) prevented instant saturation but not gradual drift.
+
+---
+
+# Gated Recursive Training — v12 Run Notes
+Date: 2026-03-19 (active)
+
+## What we ran
+Full Chinchilla pipeline from scratch: base_train → mid_train → chat_sft.
+Branch: `gated-recursive`. Pod: TBD, 8×A100, $11.92/hr.
+Same hyperparams as v11 but with gate_proj frozen during warmup.
+
+## Changes vs v11
+
+| Fix | Detail |
+|-----|--------|
+| Freeze gate_proj during warmup | After backward and before optimizer.step(), gate_proj gradients are zeroed while lambda_t==0. This prevents gate_proj.bias from drifting negative before recur has learned useful representations. Once lambda kicks in (after warmup), gate_proj unfreezes automatically. |
+
+## Status
+- Launching 2026-03-19
 
 ---
 
