@@ -164,7 +164,9 @@ def forward_model(model, input_ids, num_recur=None):
     losses[:, -1] = float('nan')
     # Get the argmax predictions at each position
     predictions = outputs.argmax(dim=-1)
-    return losses, predictions
+    # Grab gate_mean if the model exposes it (gated recursive transformer)
+    gate_mean = getattr(model, '_last_gate_mean', None)
+    return losses, predictions, gate_mean
 
 
 @torch.no_grad()
@@ -221,7 +223,7 @@ def evaluate_example(idx, model, tokenizer, data, device, task_meta, num_recur=N
     input_ids = input_ids.to(device)
 
     # Forward the model, get the autoregressive loss and argmax prediction at each token
-    losses, predictions = forward_model(model, input_ids, num_recur=num_recur)
+    losses, predictions, gate_mean = forward_model(model, input_ids, num_recur=num_recur)
 
     # See if the losses/predictions come out correctly
     if task_type == 'language_modeling':
@@ -241,7 +243,7 @@ def evaluate_example(idx, model, tokenizer, data, device, task_meta, num_recur=N
     else:
         raise ValueError(f"Unsupported task type: {task_type}")
 
-    return is_correct
+    return is_correct, gate_mean
 
 
 def evaluate_task(model, tokenizer, data, device, task_meta, num_recur=None):
@@ -252,14 +254,19 @@ def evaluate_task(model, tokenizer, data, device, task_meta, num_recur=None):
     rank = dist.get_rank() if dist.is_initialized() else 0
     world_size = dist.get_world_size() if dist.is_initialized() else 1
     correct = torch.zeros(len(data), dtype=torch.float32, device=device)
+    gate_means = torch.zeros(len(data), dtype=torch.float32, device=device)
     # stride the examples to each rank
     for idx in range(rank, len(data), world_size):
-        is_correct = evaluate_example(idx, model, tokenizer, data, device, task_meta, num_recur=num_recur)
+        is_correct, gate_mean = evaluate_example(idx, model, tokenizer, data, device, task_meta, num_recur=num_recur)
         correct[idx] = float(is_correct)
+        if gate_mean is not None:
+            gate_means[idx] = gate_mean
     # sync results across all the processes if running distributed
     if world_size > 1:
         dist.barrier()
         dist.all_reduce(correct, op=dist.ReduceOp.SUM)
-    # compute the mean
+        dist.all_reduce(gate_means, op=dist.ReduceOp.SUM)
+    # compute the means
     mean_correct = correct.mean().item()
-    return mean_correct
+    mean_gate = gate_means.mean().item() if gate_means.sum().item() > 0 else None
+    return mean_correct, mean_gate

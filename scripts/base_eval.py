@@ -79,6 +79,7 @@ def evaluate_model(model, tokenizer, device, max_per_task=-1, num_recur=None):
     # Evaluate each task
     results = {}
     centered_results = {}
+    gate_means = {}
     for task in tasks:
         start_time = time.time()
         label = task['label']
@@ -103,20 +104,24 @@ def evaluate_model(model, tokenizer, device, max_per_task=-1, num_recur=None):
             data = data[:max_per_task]
 
         # run the evaluation for this task
-        accuracy = evaluate_task(model, tokenizer, data, device, task_meta, num_recur=num_recur)
+        accuracy, task_gate_mean = evaluate_task(model, tokenizer, data, device, task_meta, num_recur=num_recur)
 
         results[label] = accuracy
         random_baseline = random_baselines[label]
         centered_result = (accuracy - 0.01 * random_baseline) / (1.0 - 0.01 * random_baseline)
         centered_results[label] = centered_result
+        if task_gate_mean is not None:
+            gate_means[label] = task_gate_mean
         end_time = time.time()
-        print0(f"accuracy: {accuracy:.4f} | centered: {centered_result:.4f} | time: {end_time - start_time:.2f}s")
+        gate_str = f" | gate_mean: {task_gate_mean:.4f}" if task_gate_mean is not None else ""
+        print0(f"accuracy: {accuracy:.4f} | centered: {centered_result:.4f}{gate_str} | time: {end_time - start_time:.2f}s")
 
     core_metric = sum(centered_results.values()) / len(centered_results)
     out = {
         "results": results,
         "centered_results": centered_results,
-        "core_metric": core_metric
+        "core_metric": core_metric,
+        "gate_means": gate_means,
     }
     return out
 

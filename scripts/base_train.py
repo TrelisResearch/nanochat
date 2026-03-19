@@ -288,13 +288,18 @@ while True:
         model.eval()
         with autocast_ctx:
             results = evaluate_model(orig_model, tokenizer, device, max_per_task=core_metric_max_per_task)
-        print0(f"Step {step:05d} | CORE metric: {results['core_metric']:.4f}")
-        wandb_run.log({
+        gate_means = results.get("gate_means", {})
+        gate_str = ", ".join(f"{k}: {v:.4f}" for k, v in gate_means.items()) if gate_means else ""
+        print0(f"Step {step:05d} | CORE metric: {results['core_metric']:.4f}" + (f" | gate_means: {gate_str}" if gate_str else ""))
+        log_data = {
             "step": step,
             "total_training_flops": flops_so_far,
             "core_metric": results["core_metric"],
             "centered_results": results["centered_results"],
-        })
+        }
+        for task_name, gm in gate_means.items():
+            log_data[f"eval_gate/{task_name}"] = gm
+        wandb_run.log(log_data)
         model.train()
 
     # once in a while: sample from the model (only on master process)
