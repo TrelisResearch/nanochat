@@ -46,6 +46,7 @@ bptt_k = 4 # truncate backprop to last k recurrences (limits gradient depth)
 # Gated recursion config
 lambda_gate = 1e-3 # sparsity penalty weight on total gate activation (λ * sum(gates))
 gate_warmup_ratio = 0.2 # fraction of training steps where λ=0 (gates open, block learns first)
+gate_ramp_ratio = 0.2   # fraction of training steps to ramp λ from 0→lambda_gate; plateaus for remainder
 # Load pretrained weights (for continuing from nanochat-recursive checkpoint with strict=False)
 load_pretrained = "" # path to checkpoint dir to load weights from (empty = train from scratch)
 # Training horizon. Only one of these 3 will be used, in this order of precedence.
@@ -231,13 +232,15 @@ def get_muon_momentum(it):
     momentum = (1 - frac) * 0.85 + frac * 0.95
     return momentum
 
-# Lambda schedule for gate sparsity penalty: 0 for first gate_warmup_ratio of training, then linear ramp
+# Lambda schedule: warmup (λ=0) → ramp (0→lambda_gate) → plateau (lambda_gate)
 def get_lambda_t(it):
     warmup_iters = round(gate_warmup_ratio * num_iterations)
+    ramp_iters = round(gate_ramp_ratio * num_iterations)
     if it < warmup_iters:
         return 0.0
-    progress = (it - warmup_iters) / max(1, num_iterations - warmup_iters)
-    return lambda_gate * min(1.0, progress)
+    if it < warmup_iters + ramp_iters:
+        return lambda_gate * (it - warmup_iters) / max(1, ramp_iters)
+    return lambda_gate
 
 # -----------------------------------------------------------------------------
 # Loop state (variables updated by the training loop)

@@ -379,15 +379,16 @@ class GPT(nn.Module):
         gate_cost = torch.tensor(0.0, device=idx.device)
         B, T = idx.shape
         for i in range(num_recur):
-            # Compute gate from current state (before this recursion step)
-            g = torch.sigmoid(self.gate_proj(s))  # [B, T, 1]
-            # Inference early exit: if all gates are closed, remaining steps are no-ops
-            if kv_cache is not None and g.max().item() < self.config.gate_threshold:
-                break
             # Run recur blocks: u = recur(inject(concat(e, s)))
             u = self.inject(torch.cat([e, s], dim=-1))
             for block in self.transformer.recur:
                 u = block(u, cos_sin, kv_cache)
+            # Compute gate from u-s: how much would this step change the state?
+            # Small u-s means converged → gate closes. Large u-s means still updating → gate stays open.
+            g = torch.sigmoid(self.gate_proj(u - s))  # [B, T, 1]
+            # Inference early exit: if all gates are closed, remaining steps are no-ops
+            if kv_cache is not None and g.max().item() < self.config.gate_threshold:
+                break
             # Gated state update
             s = s + g * (u - s)
             gate_cost = gate_cost + g.sum()

@@ -57,7 +57,8 @@ eval_metrics_every = 200
 eval_metrics_max_problems = 1024
 # Gated recursion config
 lambda_gate = 1e-3 # sparsity penalty weight on total gate activation
-gate_warmup_ratio = 0.2 # fraction of training where λ=0
+gate_warmup_ratio = 0.0 # fraction of training where λ=0 (gates already trained from base_train)
+gate_ramp_ratio = 0.2   # fraction of training steps to ramp λ from 0→lambda_gate; plateaus for remainder
 # now allow CLI to override the settings via the configurator lol
 config_keys = [k for k,v in globals().items() if not k.startswith('_') and isinstance(v, (int, float, bool, str))]
 exec(open(os.path.join('nanochat', 'configurator.py')).read()) # overrides from command line or config file
@@ -171,10 +172,12 @@ def get_lr_multiplier(it):
 # Lambda schedule for gate sparsity penalty
 def get_lambda_t(it):
     warmup_iters = round(gate_warmup_ratio * num_iterations)
+    ramp_iters = round(gate_ramp_ratio * num_iterations)
     if it < warmup_iters:
         return 0.0
-    progress = (it - warmup_iters) / max(1, num_iterations - warmup_iters)
-    return lambda_gate * min(1.0, progress)
+    if it < warmup_iters + ramp_iters:
+        return lambda_gate * (it - warmup_iters) / max(1, ramp_iters)
+    return lambda_gate
 
 # Go!
 step = 0
