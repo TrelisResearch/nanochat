@@ -40,6 +40,7 @@ def load_env():
 
 TRAIN_CMD = textwrap.dedent("""\
     set -euo pipefail
+    exec > >(tee /tmp/train.log) 2>&1
     export PIP_ROOT_USER_ACTION=ignore
 
     # ── System packages ──────────────────────────────────────────────────────
@@ -77,31 +78,24 @@ TRAIN_CMD = textwrap.dedent("""\
         https://karpathy-public.s3.us-west-2.amazonaws.com/identity_conversations.jsonl
     fi
 
-    # Pull nanochat-recursive base checkpoint + tokenizer (starting point for gated training)
-    python -m scripts.pull_from_hf \\
-      --repo-id Trelis/nanochat-recursive \\
-      --repo-path base/d20 \\
-      --stage base \\
-      --target-tag d20
-
+    # Pull tokenizer from nanochat-recursive HF repo
     python -m scripts.pull_from_hf \\
       --repo-id Trelis/nanochat-recursive \\
       --repo-path tokenizer/latest \\
       --dest-dir "${NANOCHAT_BASE_DIR:-/root/.cache/nanochat}/tokenizer"
 
     # Download pre-training data shards (240 shards × ~100MB ≈ 24GB)
-    # Tokenizer is already pulled from HF above, no need to retrain it
     python -m nanochat.dataset -n 8
     python -m nanochat.dataset -n 240 &
     DATASET_DOWNLOAD_PID=$!
     echo "Waiting for dataset download to complete..."
     wait $DATASET_DOWNLOAD_PID
 
-    # Continued pre-training: load recursive weights, add gates, train ~20% of tokens
-    # target_param_data_ratio=5 gives ~20% of Chinchilla budget (vs default 20)
+    # Pre-training from scratch with gated loss.
+    # Gates co-adapt with representations from the start (no pre-training mismatch).
+    # target_param_data_ratio=5 gives ~20% of Chinchilla budget.
     torchrun --standalone --nproc_per_node=8 -m scripts.base_train -- \\
       --run=gated-recursive-pretrain \\
-      --load_pretrained="${NANOCHAT_BASE_DIR}/base_checkpoints/d20" \\
       --lambda_gate=1e-3 \\
       --gate_warmup_ratio=0.2 \\
       --target_param_data_ratio=5 \\
@@ -113,12 +107,12 @@ TRAIN_CMD = textwrap.dedent("""\
       --repo-id Trelis/nanochat-gated-recursive \\
       --path-in-repo base/d20
 
-    # Mid-training
+    # Mid-training (device_batch_size=32: gradient checkpointing eliminates the v6 OOM)
     torchrun --standalone --nproc_per_node=8 -m scripts.mid_train -- \\
       --run=gated-recursive-mid \\
       --lambda_gate=1e-3 \\
       --gate_warmup_ratio=0.2 \\
-      --device_batch_size=16
+      --device_batch_size=32
 
     # SFT
     torchrun --standalone --nproc_per_node=8 -m scripts.chat_sft -- \\
@@ -191,6 +185,7 @@ def main():
         "volumeInGb": args.volume,
         "volumeMountPath": cfg.VOLUME_MOUNT_PATH,
         "ports": cfg.PORTS,
+        "supportPublicIp": True,
         "env": env,
         "dockerStartCmd": ["bash", "-c", TRAIN_CMD],
     }
