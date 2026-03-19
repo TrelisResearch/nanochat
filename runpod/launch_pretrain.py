@@ -92,13 +92,12 @@ TRAIN_CMD = textwrap.dedent("""\
 
     # Pre-training from scratch with gated loss.
     # Gates co-adapt with representations from the start (no pre-training mismatch).
-    # target_param_data_ratio=5 gives ~20% of Chinchilla budget.
     torchrun --standalone --nproc_per_node=8 -m scripts.base_train -- \\
       --run=gated-recursive-pretrain \\
       --lambda_gate=1e-3 \\
       --gate_warmup_ratio=0.2 \\
-      --target_param_data_ratio=5 \\
-      --warmdown_ratio=0.3
+      --target_param_data_ratio=20 \\
+      --warmdown_ratio=0.2
 
     # Push pre-trained gated model
     python -m scripts.push_to_hf \\
@@ -106,19 +105,19 @@ TRAIN_CMD = textwrap.dedent("""\
       --repo-id Trelis/nanochat-gated-recursive \\
       --path-in-repo base/d20
 
-    # Mid-training (device_batch_size=32: gradient checkpointing eliminates the v6 OOM)
+    # Mid-training: gates already trained, no warmup needed
     torchrun --standalone --nproc_per_node=8 -m scripts.mid_train -- \\
       --run=gated-recursive-mid \\
       --lambda_gate=1e-3 \\
-      --gate_warmup_ratio=0.2 \\
+      --gate_warmup_ratio=0.0 \\
       --device_batch_size=32
 
-    # SFT
+    # SFT: gates already trained, no warmup needed
     torchrun --standalone --nproc_per_node=8 -m scripts.chat_sft -- \\
       --run=gated-recursive-sft \\
       --source=mid \\
       --lambda_gate=1e-3 \\
-      --gate_warmup_ratio=0.2
+      --gate_warmup_ratio=0.0
 
     # Push all
     python -m scripts.push_to_hf \\
