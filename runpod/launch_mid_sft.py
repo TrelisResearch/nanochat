@@ -37,6 +37,9 @@ def load_env():
 # ── Training command that runs on the pod ────────────────────────────────────
 TRAIN_CMD = textwrap.dedent("""\
     set -euo pipefail
+    /start.sh &  # start RunPod services (generates SSH host keys, starts sshd)
+    sleep 15     # wait for sshd to be ready before training starts
+    exec > >(tee /tmp/train.log) 2>&1
     export PIP_ROOT_USER_ACTION=ignore
 
     # ── System packages ──────────────────────────────────────────────────────
@@ -87,15 +90,12 @@ TRAIN_CMD = textwrap.dedent("""\
       --repo-path tokenizer/latest \\
       --dest-dir "${NANOCHAT_BASE_DIR:-/root/.cache/nanochat}/tokenizer"
 
-    # Mid-training with gated loss
-    # device_batch_size=16: gated model stores extra tensors for backward through gated update
-    # (s_old + u-s per step x4 recurrences ≈ +1.7 GB vs recursive at same batch).
-    # Halving from 32→16 frees several GB; grad_accum=2 keeps total_batch_size at 524288 tokens.
+    # Mid-training with gated loss (device_batch_size=32: gradient checkpointing eliminates OOM)
     torchrun --standalone --nproc_per_node=8 -m scripts.mid_train -- \\
       --run=gated-recursive-mid \\
       --lambda_gate=1e-3 \\
       --gate_warmup_ratio=0.2 \\
-      --device_batch_size=16
+      --device_batch_size=32
 
     # SFT with gated loss
     torchrun --standalone --nproc_per_node=8 -m scripts.chat_sft -- \\
@@ -167,11 +167,12 @@ def main():
         "volumeInGb": args.volume,
         "volumeMountPath": cfg.VOLUME_MOUNT_PATH,
         "ports": cfg.PORTS,
+        "supportPublicIp": True,
         "env": env,
         "dockerStartCmd": ["bash", "-c", TRAIN_CMD],
     }
 
-    print(f"Launching '{args.name}': mid+SFT on {args.gpus}×H100, branch={args.branch}")
+    print(f"Launching '{args.name}': mid+SFT on {args.gpus}×GPU, branch={args.branch}")
     result = create_pod(api_key, pod_config, dry_run=args.dry_run)
     if result:
         print(f"Pod created: id={result.get('id')}  cost=${result.get('costPerHr')}/hr")

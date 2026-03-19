@@ -1,23 +1,20 @@
 """
-Launch gated-recursive continued pre-training on RunPod.
+Launch full gated-recursive pipeline on RunPod: base_train → mid_train → chat_sft.
 
-Use this AFTER mid+SFT is working. Pre-training downloads ~24GB of data
-(240 shards × ~100MB each) before training starts.
+Trains the model from scratch with gates co-adapting from the start
+(avoids pre-training mismatch seen in v8). Downloads ~24GB of pre-training
+data shards + reuses tokenizer from Trelis/nanochat-recursive.
 
 Workflow on the pod:
-  1. Pull nanochat-recursive base checkpoint from HF
-  2. Download training data (~24GB)
-  3. Run base_train.py with load_pretrained pointing at recursive checkpoint
-     and gated loss (lambda schedule: 0→lambda_gate over training)
-  4. Then kick off mid_train + chat_sft
-  5. Push all stages to HF
-
-Target budget: ~20-30% of original nanochat training tokens (~$20-30 on 8×H100)
-This is set via --target_param_data_ratio=5 (vs default Chinchilla=20).
+  1. Pull tokenizer from Trelis/nanochat-recursive HF repo
+  2. Download pre-training data shards (~24GB)
+  3. base_train from scratch with gated loss (target_param_data_ratio=5, ~20% Chinchilla)
+  4. Push base checkpoint to HF
+  5. mid_train → chat_sft → push to HF
 
 Usage:
   uv run runpod/launch_pretrain.py --dry-run
-  uv run runpod/launch_pretrain.py --name gated-pretrain
+  uv run runpod/launch_pretrain.py --name nanochat-gated-v9
 """
 
 import argparse
