@@ -40,7 +40,8 @@ def load_env():
 
 TRAIN_CMD = textwrap.dedent("""\
     set -euo pipefail
-    /usr/sbin/sshd  # start SSH daemon so we can monitor remotely
+    /start.sh &  # start RunPod services (generates SSH host keys, starts sshd)
+    sleep 15     # wait for sshd to be ready before training starts
     exec > >(tee /tmp/train.log) 2>&1
     export PIP_ROOT_USER_ACTION=ignore
 
