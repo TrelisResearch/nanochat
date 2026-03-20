@@ -376,7 +376,7 @@ The sigmoid g=0 fixed point is a structural flaw: once the gate closes, the grad
 - λ drives g toward gate_min, not toward 0 — minimum compute, not zero compute
 
 ## Results
-Leaky gate doesn't address the root cause. Step 0 is always forced, so recur already always trains regardless of gate state. The leaky gate just floors gate_mean at 0.1 without changing the underlying incentive structure. Killed early.
+Killed early — leaky gate doesn't address the root cause. Step 0 is always forced, so recur already always trains regardless of gate state on steps 1+. The leaky gate just floors gate_mean at 0.1 without changing the underlying incentive: CE has no reason to keep gated steps open beyond what step 0 already provides.
 
 **Root cause of all collapses:** CE has no incentive to keep gated steps (1+) open — step 0 already provides the recurrence benefit. The gate input signal also matters: norm(u-s) is structurally limited to a scalar convergence measure and cannot distinguish token difficulty, which is why v13 found a global bias equilibrium (all tokens same gate value) rather than per-token selectivity.
 
@@ -398,11 +398,14 @@ Date: 2026-03-20
 - **Restore ramp** (gate_ramp_ratio=0.2): λ ramps gradually after freeze lifts
 - **λ=1e-2**: same as v13 which found a partial equilibrium (0.667); now with better gate input
 
-## Expected behaviour
-- During freeze: gate stable at 0.5 (sigmoid(0)); recur learns useful representations
-- After unfreeze: weight starts learning from cat([u,s]) signal
-- λ=1e-2 + ramp finds an equilibrium that is per-token selective (unlike v13's global bias equilibrium)
-- gate_mean should vary by task difficulty at eval
+## Results
+gate_mean stayed at 0 throughout base_train, mid_train, and SFT. Same collapse as every other from-scratch run. Killed.
+
+**Key realization from reviewing W&B history:** Three consecutive pre-v11 runs all showed gate_mean ~0.10 in mid-training — a robust, consistent attractor. Most of these were mid-training runs starting from the pretrained `Trelis/nanochat-recursive` checkpoint (not from scratch). v9b (gated pre-train from scratch at ratio=5) also showed ~0.09-0.10. The v11 "fix" (norm(u-s)) broke what was working.
+
+**What changed in v11 that broke the ~0.10 equilibrium:** norm(u-s) bounded the gate input, preventing the saturation that was creating per-token heterogeneity. With raw unscaled u-s, after the first Muon step on inject, u-s became a large token-specific vector → sigmoid saturated differently per token → natural ~0.10 average. Norming it destroyed this mechanism.
+
+**v9b re-evaluation:** The original notes called ~0.09-0.10 a failure ("did not become selective"). This may have been wrong — ~0.10 could be the correct equilibrium for this λ calibration. The runs were not allowed to run long enough to see whether per-task differentiation emerged.
 
 ## Launch command
 ```bash
