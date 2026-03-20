@@ -535,6 +535,13 @@ Leaky gate worked structurally — gate started at 0.1 (floor), confirming gate_
 
 **Running v25 in parallel** (λ=3e-3, gate_min=0.1) to test whether higher λ finds stable intermediate.
 
+## Results (SFT)
+Gate stays very close to open (~1.0) throughout SFT, matching end-of-mid value of 0.997. λ=1e-3 is insufficient to pull gate down even during SFT's shorter training — CE adapts fully and gate returns to near-maximum.
+
+**Conclusion:** λ=1e-3 + gate_min=0.1 produces a model that always recurses fully (g≈1.0). The leaky gate worked structurally but λ is too conservative. v25 (λ=3e-3) is the active experiment.
+
+Pod terminated.
+
 ---
 
 # Gated Recursive Training — v25

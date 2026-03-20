@@ -114,11 +114,18 @@ TRAIN_CMD = textwrap.dedent("""\
     # Eval after SFT
     torchrun --standalone --nproc_per_node=8 -m scripts.chat_eval -- -i sft
 
-    # Push to HF
+    # Push SFT checkpoint to HF
     python -m scripts.push_to_hf \\
       --stage sft \\
       --repo-id Trelis/nanochat-gated-recursive \\
       --path-in-repo sft/d20-{version}
+
+    # Generate and push report
+    python -m nanochat.report generate
+    python -m scripts.push_to_hf \\
+      --model-dir "${NANOCHAT_BASE_DIR:-/root/.cache/nanochat}/report" \\
+      --repo-id Trelis/nanochat-gated-recursive \\
+      --path-in-repo report/d20-{version}
 
     # Self-terminate pod so RunPod doesn't restart the container
     curl -s -X DELETE -H "Authorization: Bearer ${RUNPOD_API_KEY}" \
