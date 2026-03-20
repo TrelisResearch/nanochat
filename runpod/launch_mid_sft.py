@@ -93,7 +93,7 @@ TRAIN_CMD = textwrap.dedent("""\
     # Mid-training: gates untrained but recur is pretrained → ramp λ, no delay
     torchrun --standalone --nproc_per_node=8 -m scripts.mid_train -- \\
       --run=gated-recursive-mid-{version} \\
-      --lambda_gate=1e-2 \\
+      --lambda_gate={lambda_gate} \\
       --gate_delay_ratio=0.0 \\
       --gate_ramp_ratio=0.2 \\
       --device_batch_size=32
@@ -105,7 +105,7 @@ TRAIN_CMD = textwrap.dedent("""\
     torchrun --standalone --nproc_per_node=8 -m scripts.chat_sft -- \\
       --run=gated-recursive-sft-{version} \\
       --source=mid \\
-      --lambda_gate=1e-2 \\
+      --lambda_gate={lambda_gate} \\
       --gate_delay_ratio=0.0 \\
       --gate_ramp_ratio=0.0
 
@@ -147,8 +147,9 @@ def main():
     import pod_config as cfg
 
     parser = argparse.ArgumentParser(description="Launch gated-recursive mid+SFT on RunPod")
-    parser.add_argument("--name",    default="nanochat-gated-mid-sft")
-    parser.add_argument("--version", required=True, help="Run version tag appended to W&B run names (e.g. v22)")
+    parser.add_argument("--name",        default="nanochat-gated-mid-sft")
+    parser.add_argument("--version",     required=True, help="Run version tag appended to W&B run names (e.g. v23)")
+    parser.add_argument("--lambda-gate", default="3e-3", help="Gate sparsity penalty weight (default: 3e-3)")
     parser.add_argument("--branch",  default="gated-recursive")
     parser.add_argument("--gpus",    type=int, default=cfg.GPU_COUNT)
     parser.add_argument("--image",   default=cfg.IMAGE)
@@ -183,10 +184,12 @@ def main():
         "ports": cfg.PORTS,
         "supportPublicIp": True,
         "env": env,
-        "dockerStartCmd": ["bash", "-c", TRAIN_CMD.replace("{version}", args.version)],
+        "dockerStartCmd": ["bash", "-c", TRAIN_CMD
+            .replace("{version}", args.version)
+            .replace("{lambda_gate}", args.lambda_gate)],
     }
 
-    print(f"Launching '{args.name}' (version={args.version or 'unset'}): mid+SFT on {args.gpus}×GPU, branch={args.branch}")
+    print(f"Launching '{args.name}' (version={args.version}, lambda={args.lambda_gate}): mid+SFT on {args.gpus}×GPU, branch={args.branch}")
     result = create_pod(api_key, pod_config, dry_run=args.dry_run)
     if result:
         print(f"Pod created: id={result.get('id')}  cost=${result.get('costPerHr')}/hr")

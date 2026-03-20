@@ -470,6 +470,32 @@ Date: 2026-03-20
 uv run runpod/launch_mid_sft.py --version v22 --name nanochat-gated-v22
 ```
 
+## Results
+Gate collapsed to ~0 from the first logged step and stayed there (gate_mean ≈ 5e-4). Opposite of v21.
+
+**Root cause — sigmoid bistability:** sigmoid has two absorbing fixed points at g=0 and g=1. Gradient vanishes at both ends. λ=1e-3 (v21) → CE wins → gate stuck at 1. λ=1e-2 (v22) → λ wins → gate stuck at 0. Both are stable attractors; once the gate reaches either end it can't escape. HumanEval showed gate_mean: nan (numerical instability from degenerate weights at inference time).
+
+**Also fixed:** nan guard added to chat_eval gate_mean accumulation (filters out nan values from degenerate model inference).
+
+---
+
+# Gated Recursive Training — v23
+Date: 2026-03-20
+
+## Changes vs v22
+- **λ=3e-3**: midpoint between v21 (1e-3, gate→1) and v22 (1e-2, gate→0)
+- Hypothesis: there may be a stable equilibrium at intermediate λ before sigmoid saturation dominates in either direction
+- All other settings unchanged: mid delay=0.0, ramp=0.2; SFT delay=0.0, ramp=0.0
+- **launch_mid_sft.py now accepts --lambda-gate arg** (default 3e-3) for easy λ sweeps
+
+## Risk
+With sigmoid bistability, 3e-3 may also collapse to 0 or 1 rather than finding a middle equilibrium. If it does, the next step is a structural fix (leaky gate floor, normalized gate input, or different activation function).
+
+## Launch command
+```bash
+uv run runpod/launch_mid_sft.py --version v23 --lambda-gate 3e-3 --name nanochat-gated-v23
+```
+
 ---
 
 # Architecture Improvement Ideas

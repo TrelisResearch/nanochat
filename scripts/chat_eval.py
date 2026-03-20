@@ -9,6 +9,7 @@ torchrun --nproc_per_node=8 -m scripts.chat_eval -- -a ARC-Easy
 """
 
 import argparse
+import math
 from functools import partial
 from contextlib import nullcontext
 
@@ -54,7 +55,7 @@ def run_generative_eval(task_object, tokenizer, model, engine, num_samples, max_
             num_recur=num_recur,
         )
         gm = getattr(inner_model, '_last_gate_mean', None)
-        if gm is not None:
+        if gm is not None and not math.isnan(gm):
             gate_sum += gm
             gate_count += 1
         # Decode the completions as text
