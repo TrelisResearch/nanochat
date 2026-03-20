@@ -163,9 +163,10 @@ class GPT(nn.Module):
         })
         # Input injection adapter: concat(e, s) -> linear -> u
         self.inject = nn.Linear(2 * config.n_embd, config.n_embd, bias=False)
-        # Gate projection: scalar gate per token; no bias so gate must be token-specific
-        # (bias would allow a global equilibrium, preventing per-token selectivity)
-        self.gate_proj = nn.Linear(config.n_embd, 1, bias=False)
+        # Gate projection: cat([e, s]) -> scalar gate per token.
+        # Uses same input as inject so gate sees both the current input and recurrent state.
+        # No bias: forces token-specific gating via weight only.
+        self.gate_proj = nn.Linear(2 * config.n_embd, 1, bias=False)
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
         # To support meta device initialization, we init the rotary embeddings here, but it's fake
         # As for rotary_seq_len, these rotary embeddings are pretty small/cheap in memory,
@@ -372,7 +373,10 @@ class GPT(nn.Module):
 
         # 4. Gated recurrent block (run num_recur times with fixed K during training)
         # Step 0: always full update (g_eff=1) — full gradients to recur blocks.
-        # Steps 1+: g = sigmoid(gate_proj(u-s)); gated update; gate_cost accumulated.
+        # Steps 1+: g = sigmoid(gate_proj(cat([e,s]))); gated update; gate_cost accumulated.
+        # Gate uses cat([e,s]) — same input as inject — so it sees both the current input
+        # and recurrent state. After step 0, s is meaningful (not just e), so the gate
+        # has real information. No degeneracy at init (cat([e,s]) always non-zero).
         # Structured to avoid if/else branching around tensor ops (torch.compile safe).
         gate_cost = torch.tensor(0.0, device=idx.device)
         B, T = idx.shape
@@ -381,9 +385,7 @@ class GPT(nn.Module):
             u = self.inject(torch.cat([e, s], dim=-1))
             for block in self.transformer.recur:
                 u = block(u, cos_sin, kv_cache)
-            # norm(u-s) stabilises the gate signal: keeps input magnitude bounded after Muon
-            # updates inject away from [I|0] init; norm(0)=0 so init behaviour is unchanged.
-            g = torch.sigmoid(self.gate_proj(norm(u - s)))  # [B, T, 1]
+            g = torch.sigmoid(self.gate_proj(torch.cat([e, s], dim=-1)))  # [B, T, 1]
             # Scalar multipliers resolved at trace time (i is a Python int) — no tensor branches.
             # step 0: gate_scale=0 (forced full update, not penalised); steps 1+: gate_scale=1
             gate_scale = 0.0 if i == 0 else 1.0

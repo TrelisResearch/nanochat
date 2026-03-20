@@ -70,7 +70,7 @@ def test_model_has_gate_proj():
     assert hasattr(model, "gate_proj"), "model must have gate_proj"
     import torch.nn as nn
     assert isinstance(model.gate_proj, nn.Linear)
-    assert model.gate_proj.weight.shape == (1, model.config.n_embd)
+    assert model.gate_proj.weight.shape == (1, 2 * model.config.n_embd)
     assert model.gate_proj.bias is None, "gate_proj must have no bias (bias=False forces per-token selectivity)"
 
 
@@ -203,16 +203,13 @@ def test_open_gate_produces_nonzero_gate_cost():
 # ---------------------------------------------------------------------------
 
 def test_gradients_flow_through_gate():
-    """gate_proj.weight must receive a non-zero gradient when u-s is non-trivial.
+    """gate_proj.weight must receive a non-zero gradient during training.
 
-    At exact init, inject=[I|0]+c_proj=0 gives u-s=0 so weight.grad=0. We perturb
-    inject to break this degeneracy before testing gradient flow.
+    Gate uses cat([e,s]) which is always non-zero, so weight.grad is non-zero
+    from the first step regardless of the inject=[I|0]+c_proj=0 init.
     """
     model = make_model()
     model.train()
-    with torch.no_grad():
-        # break inject=[I|0] degeneracy so u != s and weight grad is non-zero
-        model.inject.weight.add_(torch.randn_like(model.inject.weight) * 0.1)
     B, T = 2, 8
     idx = torch.randint(0, 256, (B, T))
     targets = torch.randint(0, 256, (B, T))
@@ -224,11 +221,9 @@ def test_gradients_flow_through_gate():
 
 
 def test_gate_cost_grad_flows_to_weight():
-    """gate_cost must be differentiable w.r.t. gate_proj.weight when u-s is non-trivial."""
+    """gate_cost must be differentiable w.r.t. gate_proj.weight."""
     model = make_model()
     model.train()
-    with torch.no_grad():
-        model.inject.weight.add_(torch.randn_like(model.inject.weight) * 0.1)
     B, T = 2, 8
     idx = torch.randint(0, 256, (B, T))
     targets = torch.randint(0, 256, (B, T))
@@ -335,22 +330,22 @@ def test_generate_with_temperature_zero_is_deterministic():
 
 
 # ---------------------------------------------------------------------------
-# Gate conditioned on u-s
+# Gate conditioned on cat([e, s])
 # ---------------------------------------------------------------------------
 
-def test_gate_uses_diff_signal():
-    """Gate output changes when u-s changes, confirming gate is computed from u-s."""
+def test_gate_uses_state_signal():
+    """Gate output changes when s changes, confirming gate is computed from cat([e,s])."""
     torch.manual_seed(0)
     model = make_model()
     model.train(False)
     with torch.no_grad():
         B, T = 1, 4
-        u = torch.randn(B, T, model.config.n_embd)
+        e = torch.randn(B, T, model.config.n_embd)
         s1 = torch.zeros(B, T, model.config.n_embd)
         s2 = torch.randn(B, T, model.config.n_embd)
-        g1 = torch.sigmoid(model.gate_proj(u - s1))
-        g2 = torch.sigmoid(model.gate_proj(u - s2))
-    assert not torch.allclose(g1, g2), "Gate output must differ when s differs (gate depends on u-s)"
+        g1 = torch.sigmoid(model.gate_proj(torch.cat([e, s1], dim=-1)))
+        g2 = torch.sigmoid(model.gate_proj(torch.cat([e, s2], dim=-1)))
+    assert not torch.allclose(g1, g2), "Gate output must differ when s differs (gate depends on cat([e,s]))"
 
 
 # ---------------------------------------------------------------------------

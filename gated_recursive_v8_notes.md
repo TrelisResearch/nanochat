@@ -277,21 +277,42 @@ With a trainable bias, `gate = sigmoid(weight @ norm(u-s) + bias)`. When weight 
 
 ---
 
-# Gated Recursive Training — v14 Plan
-Date: 2026-03-20 (planned)
+# Gated Recursive Training — v14
+Date: 2026-03-20
 
 ## Changes vs v13
 - Remove `gate_proj` bias (`bias=False` in `nn.Linear`)
 - Keep λ=1e-2, all other settings unchanged
 
-## Expected behaviour
-- gate_mean at init ≈ 0.5 (sigmoid(0)), but frozen during warmup so irrelevant
-- After unfreeze: gate must learn token-specific patterns via weight, no global bias escape
-- λ=1e-2 should drive per-token selectivity rather than uniform global equilibrium
+## Results
+gate_mean crashed to ~0 immediately after unfreeze. Same failure mode as v11: CE gradient drives gate_proj.weight negative before recur has learned anything useful, so all gates close.
+
+**Root cause:** Without a bias floor, λ can drive `gate_proj.weight` to produce arbitrarily negative outputs → sigmoid→0 → gate collapses. With bias=True (v13), the bias stabilised at a global equilibrium (0.667); without it, there is no floor and λ wins completely. λ=1e-2 is strong enough to collapse the gate rather than find a partial equilibrium.
+
+**Pattern across runs:**
+- v11 (bias=True, no freeze): gate collapses to ~0 immediately
+- v12 (bias=True, freeze): stable at 0.88 during freeze, jumps to 1.0 on unfreeze (CE dominates λ=1e-3)
+- v13 (bias=True, freeze, λ=1e-2): stable at 0.667 — global bias equilibrium, no per-token selectivity
+- v14 (bias=False, freeze, λ=1e-2): crashes to 0 after unfreeze — λ collapses weight with no bias floor
+
+---
+
+# Gated Recursive Training — v15
+Date: 2026-03-20
+
+## Changes vs v14
+- Gate input changed from `norm(u-s)` to `cat([e, s])` — same input as inject
+- Remove explicit gate freeze (no longer needed — see below)
+- Keep λ ramp
+
+## Motivation
+`cat([e, s])` is semantically richer: gate asks "given this input (e) and my current state (s), should I recurse further?" rather than "is the proposed update large?". After step 0, s is a meaningful updated state, so the gate has real information. No degeneracy at init (cat([e,s]) always non-zero → gradient flows from step 1).
+
+**Why drop the freeze:** With `cat([e,s])`, CE gradient flows to gate_proj from the start. During the warmup phase (λ=0), CE wants gates open, which is fine — recur is learning. As λ ramps up it pushes back. No sudden unfreeze transition, so no collapse risk. The freeze was a workaround for the u-s degeneracy; cat([e,s]) eliminates the need for it.
 
 ## Launch command
 ```bash
-uv run runpod/launch_pretrain.py --version v14 --lambda-gate 1e-2 --name nanochat-gated-v14
+uv run runpod/launch_pretrain.py --version v15 --lambda-gate 1e-2 --name nanochat-gated-v15
 ```
 
 ---
