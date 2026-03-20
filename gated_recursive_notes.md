@@ -444,6 +444,32 @@ RUNPOD_API_KEY was not forwarded to pod in launch_mid_sft.py → self-terminate 
 uv run runpod/launch_mid_sft.py --version v21 --name nanochat-gated-v21
 ```
 
+## Results
+Gate stayed at ~0.88 (bias=+2) during freeze (delay=0.2), then jumped to 1.0 at unfreeze. λ=1e-3 too weak to pull gate down from 1.0. Never found a selective equilibrium.
+
+---
+
+# Gated Recursive Training — v22
+Date: 2026-03-20
+
+## Changes vs v21
+- **λ=1e-2** (up from 1e-3): stronger signal to pull gate down from 1.0
+- **mid: delay=0.0, ramp=0.2**: no delay (recur already pretrained, gate has real signal from step 1); ramp λ gradually so gate can develop weight patterns before full λ hits
+- **SFT: delay=0.0, ramp=0.0**: gates trained from mid → full λ from step 1
+- **chat_eval after mid and SFT**: automated full benchmark suite (ARC, MMLU, GSM8K, HumanEval, SpellingBee) now runs on-pod after each stage, results go to report
+- **gate_mean per task in chat_eval**: per-task gate_mean now logged to report — key signal for whether architecture does dynamic compute allocation (GSM8K/HumanEval should show higher gate_mean than SpellingBee)
+- **RUNPOD_API_KEY forwarded in launch_pretrain.py**: fixes self-terminate (same bug as v21 fixed for launch_mid_sft)
+
+## Lambda schedule logic (now consistent across all scripts)
+- **mid from pretrained checkpoint** (launch_mid_sft): delay=0.0, ramp=0.2 — gates untrained but recur already useful
+- **mid from scratch** (launch_pretrain, after base_train): delay=0.0, ramp=0.0 — gates co-trained in base_train
+- **SFT** (both): delay=0.0, ramp=0.0 — gates trained from mid
+
+## Launch command
+```bash
+uv run runpod/launch_mid_sft.py --version v22 --name nanochat-gated-v22
+```
+
 ---
 
 # Architecture Improvement Ideas

@@ -32,11 +32,13 @@ def run_generative_eval(task_object, tokenizer, model, engine, num_samples, max_
 
     ddp, ddp_rank, ddp_local_rank, ddp_world_size = get_dist_info()
     device = model.get_device()
+    inner_model = model.module if hasattr(model, 'module') else model
 
     num_problems = len(task_object) if max_problems is None else min(len(task_object), max_problems)
 
     # Run the evaluation
     num_passed, total = 0, 0
+    gate_sum, gate_count = 0.0, 0
     for i in range(ddp_rank, num_problems, ddp_world_size):
         conversation = task_object[i]
 
@@ -51,6 +53,10 @@ def run_generative_eval(task_object, tokenizer, model, engine, num_samples, max_
             top_k=top_k,
             num_recur=num_recur,
         )
+        gm = getattr(inner_model, '_last_gate_mean', None)
+        if gm is not None:
+            gate_sum += gm
+            gate_count += 1
         # Decode the completions as text
         prefix_length = len(encoded_prompt)
         completions = [tokenizer.decode(result_tokens[prefix_length:]) for result_tokens in results]
@@ -76,12 +82,16 @@ def run_generative_eval(task_object, tokenizer, model, engine, num_samples, max_
         dist.all_reduce(total_tensor, op=dist.ReduceOp.SUM)
         num_passed = num_passed_tensor.item()
         total = total_tensor.item()
+        if gate_count > 0:
+            gate_tensor = torch.tensor([gate_sum, float(gate_count)], device=device)
+            dist.all_reduce(gate_tensor, op=dist.ReduceOp.SUM)
+            gate_sum, gate_count = gate_tensor[0].item(), gate_tensor[1].item()
 
     print0("=" * 50)
     print0(f"Final: {num_passed}/{total} ({100*num_passed/total:.2f}%)")
 
-    # Return the accuracy
-    return num_passed/total
+    gate_mean = gate_sum / gate_count if gate_count > 0 else None
+    return num_passed/total, gate_mean
 
 # -----------------------------------------------------------------------------
 # Categorical evaluation loop
@@ -93,6 +103,7 @@ def run_categorical_eval(task_object, tokenizer, model, batch_size, max_problems
     ddp, ddp_rank, ddp_local_rank, ddp_world_size = get_dist_info()
     device = model.get_device()
     bos = tokenizer.get_bos_token_id() # use BOS as pad token is ok, these positions are ignored
+    inner_model = model.module if hasattr(model, 'module') else model
 
     # We'll process batches of independent problems at a time because there is no sampling needed
     num_problems = len(task_object) if max_problems is None else min(len(task_object), max_problems)
@@ -102,6 +113,7 @@ def run_categorical_eval(task_object, tokenizer, model, batch_size, max_problems
     # Run the evaluation
     letter_to_id_cache = {} # many letters will repeat often, let's save the tokenizer some work
     num_passed, total = 0, 0
+    gate_sum, gate_count = 0.0, 0
     for i in range(ddp_rank, num_batches, ddp_world_size):
         i0, i1 = i * batch_size, min((i + 1) * batch_size, num_problems)
 
@@ -116,6 +128,10 @@ def run_categorical_eval(task_object, tokenizer, model, batch_size, max_problems
         # Get the logits for the whole batch of conversations in parallel (efficiency win here)
         with torch.no_grad():
             logits, _ = model(prompt_ids, num_recur=num_recur) # (B, T, V)
+        gm = getattr(inner_model, '_last_gate_mean', None)
+        if gm is not None:
+            gate_sum += gm * (i1 - i0)
+            gate_count += i1 - i0
 
         # Focus on the available answer on just the letters corresponding to choices
         # Note that this helps the evaluation a lot because it specifically narrows the focus to only the available letters
@@ -150,16 +166,21 @@ def run_categorical_eval(task_object, tokenizer, model, batch_size, max_problems
         dist.all_reduce(total_tensor, op=dist.ReduceOp.SUM)
         num_passed = num_passed_tensor.item()
         total = total_tensor.item()
+        if gate_count > 0:
+            gate_tensor = torch.tensor([gate_sum, float(gate_count)], device=device)
+            dist.all_reduce(gate_tensor, op=dist.ReduceOp.SUM)
+            gate_sum, gate_count = gate_tensor[0].item(), gate_tensor[1].item()
 
     average = num_passed/total
     print0(f"Final: {num_passed}/{total} ({100*average:.2f}%)")
-    return average
+    gate_mean = gate_sum / gate_count if gate_count > 0 else None
+    return average, gate_mean
 
 # -----------------------------------------------------------------------------
 
 def run_chat_eval(task_name, model, tokenizer, engine,
                    batch_size=1, num_samples=1, max_new_tokens=512, temperature=0.0, top_k=50,
-                   max_problems=None, num_recur=None):
+                   max_problems=None, num_recur=None, return_gate_mean=False):
     # Create the evaluation object
     task_module = {
         'HumanEval': HumanEval,
@@ -172,11 +193,13 @@ def run_chat_eval(task_name, model, tokenizer, engine,
     task_object = task_module()
     # Run the evaluation
     if task_object.eval_type == 'generative':
-        acc = run_generative_eval(task_object, tokenizer, model, engine, num_samples, max_new_tokens, temperature, top_k, max_problems=max_problems, num_recur=num_recur)
+        acc, gate_mean = run_generative_eval(task_object, tokenizer, model, engine, num_samples, max_new_tokens, temperature, top_k, max_problems=max_problems, num_recur=num_recur)
     elif task_object.eval_type == 'categorical':
-        acc = run_categorical_eval(task_object, tokenizer, model, batch_size, max_problems=max_problems, num_recur=num_recur)
+        acc, gate_mean = run_categorical_eval(task_object, tokenizer, model, batch_size, max_problems=max_problems, num_recur=num_recur)
     else:
         raise ValueError(f"Unsupported task evaluation type: {task_object.eval_type}")
+    if return_gate_mean:
+        return acc, gate_mean
     return acc
 
 # -----------------------------------------------------------------------------
@@ -235,9 +258,10 @@ if __name__ == "__main__":
         print0(f"{'='*80}")
 
         results = {}
+        gate_means = {}
         for task_name in task_names:
             with autocast_ctx:
-                acc = run_chat_eval(
+                acc, gm = run_chat_eval(
                     task_name,
                     model, tokenizer, engine,
                     batch_size=args.batch_size,
@@ -247,9 +271,13 @@ if __name__ == "__main__":
                     top_k=args.top_k,
                     max_problems=args.max_problems,
                     num_recur=num_recur,
+                    return_gate_mean=True,
                 )
                 results[task_name] = acc
-                print0(f"{task_name} accuracy: {100 * acc:.2f}%")
+                if gm is not None:
+                    gate_means[task_name] = gm
+                gate_str = f" | gate_mean: {gm:.4f}" if gm is not None else ""
+                print0(f"{task_name} accuracy: {100 * acc:.2f}%{gate_str}")
 
         all_results[recur_label] = results
 
@@ -269,11 +297,13 @@ if __name__ == "__main__":
 
         # Log to report for this recur value
         section_name = f"Chat evaluation {args.source}" + (f" (r={num_recur})" if num_recur is not None else "")
+        gate_means_dict = {f"gate_mean/{k}": v for k, v in gate_means.items()} if gate_means else {}
         get_report().log(section=section_name, data=[
             vars(args),
             {"num_recur": num_recur},
             results,
             chatcore_metric_dict,
+            gate_means_dict,
         ])
 
     compute_cleanup()

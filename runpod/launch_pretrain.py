@@ -106,19 +106,27 @@ TRAIN_CMD_TEMPLATE = textwrap.dedent("""\
       --repo-id Trelis/nanochat-gated-recursive \\
       --path-in-repo base/d20-{version}
 
-    # Mid-training: gates already trained, no warmup needed
+    # Mid-training: gates co-trained in base_train → full λ from step 1, no ramp
     torchrun --standalone --nproc_per_node=8 -m scripts.mid_train -- \\
       --run=gated-recursive-mid-{version} \\
       --lambda_gate={lambda_gate} \\
       --gate_delay_ratio=0.0 \\
+      --gate_ramp_ratio=0.0 \\
       --device_batch_size=32
 
-    # SFT: gates already trained, no warmup needed
+    # Eval after mid-training
+    torchrun --standalone --nproc_per_node=8 -m scripts.chat_eval -- -i mid
+
+    # SFT: gates trained from mid → full λ from step 1, no ramp
     torchrun --standalone --nproc_per_node=8 -m scripts.chat_sft -- \\
       --run=gated-recursive-sft-{version} \\
       --source=mid \\
       --lambda_gate={lambda_gate} \\
-      --gate_delay_ratio=0.0
+      --gate_delay_ratio=0.0 \\
+      --gate_ramp_ratio=0.0
+
+    # Eval after SFT
+    torchrun --standalone --nproc_per_node=8 -m scripts.chat_eval -- -i sft
 
     # Push all
     python -m scripts.push_to_hf \\
@@ -177,7 +185,7 @@ def main():
     env = {"NANOCHAT_BRANCH": args.branch}
     for k in ["WANDB_API_KEY", "HUGGING_FACE_HUB_TOKEN", "GITHUB_PAT",
               "GIT_USER_NAME", "GIT_USER_EMAIL", "HF_HUB_ENABLE_HF_TRANSFER",
-              "NANOCHAT_BASE_DIR"]:
+              "NANOCHAT_BASE_DIR", "RUNPOD_API_KEY"]:
         env.update(fwd(k))
 
     pod_config = {

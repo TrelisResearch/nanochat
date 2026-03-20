@@ -90,19 +90,27 @@ TRAIN_CMD = textwrap.dedent("""\
       --repo-path tokenizer/latest \\
       --dest-dir "${NANOCHAT_BASE_DIR:-/root/.cache/nanochat}/tokenizer"
 
-    # Mid-training with gated loss (device_batch_size=32: gradient checkpointing eliminates OOM)
+    # Mid-training: gates untrained but recur is pretrained → ramp λ, no delay
     torchrun --standalone --nproc_per_node=8 -m scripts.mid_train -- \\
       --run=gated-recursive-mid-{version} \\
-      --lambda_gate=1e-3 \\
-      --gate_delay_ratio=0.2 \\
+      --lambda_gate=1e-2 \\
+      --gate_delay_ratio=0.0 \\
+      --gate_ramp_ratio=0.2 \\
       --device_batch_size=32
 
-    # SFT with gated loss
+    # Eval after mid-training
+    torchrun --standalone --nproc_per_node=8 -m scripts.chat_eval -- -i mid
+
+    # SFT: gates trained from mid → full λ from step 1, no ramp
     torchrun --standalone --nproc_per_node=8 -m scripts.chat_sft -- \\
       --run=gated-recursive-sft-{version} \\
       --source=mid \\
-      --lambda_gate=1e-3 \\
-      --gate_delay_ratio=0.2
+      --lambda_gate=1e-2 \\
+      --gate_delay_ratio=0.0 \\
+      --gate_ramp_ratio=0.0
+
+    # Eval after SFT
+    torchrun --standalone --nproc_per_node=8 -m scripts.chat_eval -- -i sft
 
     # Push to HF
     python -m scripts.push_to_hf \\
@@ -140,7 +148,7 @@ def main():
 
     parser = argparse.ArgumentParser(description="Launch gated-recursive mid+SFT on RunPod")
     parser.add_argument("--name",    default="nanochat-gated-mid-sft")
-    parser.add_argument("--version", default="", help="Run version tag appended to W&B run names (e.g. v21)")
+    parser.add_argument("--version", required=True, help="Run version tag appended to W&B run names (e.g. v22)")
     parser.add_argument("--branch",  default="gated-recursive")
     parser.add_argument("--gpus",    type=int, default=cfg.GPU_COUNT)
     parser.add_argument("--image",   default=cfg.IMAGE)
