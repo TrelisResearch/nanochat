@@ -50,7 +50,7 @@ total_batch_size = 524288
 dry_run = 0 # dry_run=1 is for experiments: we will log to wandb but we won't write checkpoints or report
 # Gated recursion config
 lambda_gate = 1e-3 # sparsity penalty weight on total gate activation
-gate_warmup_ratio = 0.0 # fraction of training where λ=0 (gates already trained from base_train)
+gate_delay_ratio = 0.0 # fraction of training where λ=0 (gates already trained from base_train)
 gate_ramp_ratio = 0.2   # fraction of training steps to ramp λ from 0→lambda_gate; plateaus for remainder
 config_keys = [k for k,v in globals().items() if not k.startswith('_') and isinstance(v, (int, float, bool, str))]
 exec(open(os.path.join('nanochat', 'configurator.py')).read()) # overrides from command line or config file
@@ -177,10 +177,10 @@ def get_muon_momentum(it):
 # Lambda schedule for gate sparsity penalty
 def get_lambda_t(progress):
     # progress in [0, 1]; warmup → ramp → plateau
-    if progress < gate_warmup_ratio:
+    if progress < gate_delay_ratio:
         return 0.0
-    if progress < gate_warmup_ratio + gate_ramp_ratio:
-        return lambda_gate * (progress - gate_warmup_ratio) / max(1e-8, gate_ramp_ratio)
+    if progress < gate_delay_ratio + gate_ramp_ratio:
+        return lambda_gate * (progress - gate_delay_ratio) / max(1e-8, gate_ramp_ratio)
     return lambda_gate
 
 # -----------------------------------------------------------------------------

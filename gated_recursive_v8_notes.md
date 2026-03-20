@@ -310,22 +310,28 @@ Date: 2026-03-20
 
 **Why drop the freeze:** With `cat([e,s])`, CE gradient flows to gate_proj from the start. During the warmup phase (λ=0), CE wants gates open, which is fine — recur is learning. As λ ramps up it pushes back. No sudden unfreeze transition, so no collapse risk. The freeze was a workaround for the u-s degeneracy; cat([e,s]) eliminates the need for it.
 
-## Results (first launch)
-Gate crashed to 0 immediately even with λ=0. Root cause: CE alone drives gates closed early when recur is noisy (c_proj≈0 at init → u ≈ e + noise → applying the update hurts CE → CE closes gates). Without a bias floor or freeze, nothing resists this. λ=0 provides no counter-pressure; λ>0 would make it worse.
+## Results
+Gate crashed to 0 by step ~3. Root cause: gate_delay_ratio=0 means λ starts ramping from step 1, pushing toward closure before recur has learned anything. Even tiny λ at step 3 is enough to collapse the gate with a noisy recur.
 
-## v15 revised design
-After observing the crash, revised init:
-- **weight=0**: no token-specific signal at init (clean baseline), weight learns from step 1
-- **bias=+2** (sigmoid(2)≈0.88): gates start open so recur can learn before λ pressure builds
-- **λ ramps from step 1** (gate_warmup_ratio=0): no zero-λ phase; CE keeps gates open early while λ is tiny, smooth ramp avoids sudden transition
+Also renamed `gate_warmup_ratio` → `gate_delay_ratio` (warmup implies a ramp; this is a flat zero-λ period before the ramp).
 
-**Why not keep bias=False?** sigmoid(0)=0.5 at init, CE immediately drives weight negative (noisy recur → CE wants gates closed). No floor to resist. Bias=+2 anchors gates open.
+---
 
-**Global equilibrium risk vs v13?** Lower: in v13, norm(u-s)≈0 → weight.grad≈0 → only bias learned → pure global scalar. With cat([e,s]), weight has real gradient from step 1 and develops token-specific patterns that break the equilibrium.
+# Gated Recursive Training — v16
+Date: 2026-03-20
+
+## Changes vs v15
+- Restore `gate_delay_ratio=0.2`: λ=0 for first 20% of training before ramp begins
+- Everything else unchanged: cat([e,s]) gate, bias=+2, weight=0, no explicit freeze
+
+## Expected behaviour
+- First 20%: λ=0, gates held open by bias=+2, recur learns freely
+- Next 20%: λ ramps 0→1e-2, gate weight develops token-specific patterns via cat([e,s])
+- Remainder: λ at full strength, gate at learned selective equilibrium
 
 ## Launch command
 ```bash
-uv run runpod/launch_pretrain.py --version v15 --lambda-gate 1e-2 --name nanochat-gated-v15
+uv run runpod/launch_pretrain.py --version v16 --lambda-gate 1e-2 --name nanochat-gated-v16
 ```
 
 ---

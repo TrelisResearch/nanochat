@@ -45,7 +45,7 @@ fixed_k = 4 # fixed number of recurrences during training; fixed_k=4 gives 20 ef
 bptt_k = 4 # truncate backprop to last k recurrences (limits gradient depth)
 # Gated recursion config
 lambda_gate = 1e-3 # sparsity penalty weight on total gate activation (λ * sum(gates))
-gate_warmup_ratio = 0.0 # fraction of training steps where λ=0 (no zero phase: ramp starts from step 1)
+gate_delay_ratio = 0.2 # fraction of training steps where λ=0 before ramp begins
 gate_ramp_ratio = 0.2   # fraction of training steps to ramp λ from 0→lambda_gate; plateaus for remainder
 # Load pretrained weights (for continuing from nanochat-recursive checkpoint with strict=False)
 load_pretrained = "" # path to checkpoint dir to load weights from (empty = train from scratch)
@@ -107,7 +107,7 @@ print0(f"num_layers: {num_layers}")
 print0(f"model_dim: {model_dim}")
 print0(f"num_heads: {num_heads}")
 print0(f"num_kv_heads: {num_kv_heads}")
-print0(f"Gated recursive config: prelude={n_prelude}, recur={n_recur_block}, coda={n_coda}, fixed_k={fixed_k}, bptt_k={bptt_k}, lambda_gate={lambda_gate}, gate_warmup_ratio={gate_warmup_ratio}")
+print0(f"Gated recursive config: prelude={n_prelude}, recur={n_recur_block}, coda={n_coda}, fixed_k={fixed_k}, bptt_k={bptt_k}, lambda_gate={lambda_gate}, gate_delay_ratio={gate_delay_ratio}")
 
 # Optimizer / data / training length related hyperparameters
 # figure out the needed gradient accumulation to reach the desired total batch size
@@ -229,9 +229,9 @@ def get_muon_momentum(it):
     momentum = (1 - frac) * 0.85 + frac * 0.95
     return momentum
 
-# Lambda schedule: warmup (λ=0) → ramp (0→lambda_gate) → plateau (lambda_gate)
+# Lambda schedule: delay (λ=0) → ramp (0→lambda_gate) → plateau (lambda_gate)
 def get_lambda_t(it):
-    warmup_iters = round(gate_warmup_ratio * num_iterations)
+    warmup_iters = round(gate_delay_ratio * num_iterations)
     ramp_iters = round(gate_ramp_ratio * num_iterations)
     if it < warmup_iters:
         return 0.0

@@ -94,7 +94,7 @@ TRAIN_CMD = textwrap.dedent("""\
     torchrun --standalone --nproc_per_node=8 -m scripts.mid_train -- \\
       --run=gated-recursive-mid \\
       --lambda_gate=1e-3 \\
-      --gate_warmup_ratio=0.2 \\
+      --gate_delay_ratio=0.2 \\
       --device_batch_size=32
 
     # SFT with gated loss
@@ -102,7 +102,7 @@ TRAIN_CMD = textwrap.dedent("""\
       --run=gated-recursive-sft \\
       --source=mid \\
       --lambda_gate=1e-3 \\
-      --gate_warmup_ratio=0.2
+      --gate_delay_ratio=0.2
 
     # Push to HF
     python -m scripts.push_to_hf \\
