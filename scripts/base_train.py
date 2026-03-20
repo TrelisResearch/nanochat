@@ -45,7 +45,7 @@ fixed_k = 4 # fixed number of recurrences during training; fixed_k=4 gives 20 ef
 bptt_k = 4 # truncate backprop to last k recurrences (limits gradient depth)
 # Gated recursion config
 lambda_gate = 1e-3 # sparsity penalty weight on total gate activation (λ * sum(gates))
-gate_warmup_ratio = 0.2 # fraction of training steps where λ=0 (gates open, block learns first)
+gate_warmup_ratio = 0.0 # fraction of training steps where λ=0 (no zero phase: ramp starts from step 1)
 gate_ramp_ratio = 0.2   # fraction of training steps to ramp λ from 0→lambda_gate; plateaus for remainder
 # Load pretrained weights (for continuing from nanochat-recursive checkpoint with strict=False)
 load_pretrained = "" # path to checkpoint dir to load weights from (empty = train from scratch)

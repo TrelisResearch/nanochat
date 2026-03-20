@@ -71,7 +71,9 @@ def test_model_has_gate_proj():
     import torch.nn as nn
     assert isinstance(model.gate_proj, nn.Linear)
     assert model.gate_proj.weight.shape == (1, 2 * model.config.n_embd)
-    assert model.gate_proj.bias is None, "gate_proj must have no bias (bias=False forces per-token selectivity)"
+    assert model.gate_proj.bias is not None, "gate_proj must have bias (initialized to +2 to start gates open)"
+    assert model.gate_proj.weight.abs().sum().item() == 0.0, "gate_proj.weight must be zero at init"
+    assert abs(model.gate_proj.bias.item() - 2.0) < 1e-5, "gate_proj.bias must be +2.0 at init (sigmoid(2)≈0.88)"
 
 
 # ---------------------------------------------------------------------------
@@ -267,16 +269,18 @@ def test_setup_optimizers_covers_all_params():
 
 
 def test_gate_proj_in_optimizers():
-    """gate_proj weight must be covered by an optimizer (no bias — bias=False)."""
+    """gate_proj weight and bias must both be covered by an optimizer."""
     model = make_model()
     optimizers = model.setup_optimizers()
     gate_weight_id = id(model.gate_proj.weight)
+    gate_bias_id = id(model.gate_proj.bias)
     opt_param_ids = set()
     for opt in optimizers:
         for group in opt.param_groups:
             for p in group["params"]:
                 opt_param_ids.add(id(p))
     assert gate_weight_id in opt_param_ids, "gate_proj.weight not in any optimizer"
+    assert gate_bias_id in opt_param_ids, "gate_proj.bias not in any optimizer"
 
 
 # ---------------------------------------------------------------------------
@@ -334,11 +338,15 @@ def test_generate_with_temperature_zero_is_deterministic():
 # ---------------------------------------------------------------------------
 
 def test_gate_uses_state_signal():
-    """Gate output changes when s changes, confirming gate is computed from cat([e,s])."""
+    """Gate output changes when s changes, confirming gate is computed from cat([e,s]).
+
+    weight=0 at init so we perturb it first — at init gate is constant (bias only).
+    """
     torch.manual_seed(0)
     model = make_model()
     model.train(False)
     with torch.no_grad():
+        model.gate_proj.weight.normal_(0, 0.01)  # perturb so weight contributes
         B, T = 1, 4
         e = torch.randn(B, T, model.config.n_embd)
         s1 = torch.zeros(B, T, model.config.n_embd)

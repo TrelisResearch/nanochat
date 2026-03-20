@@ -164,9 +164,9 @@ class GPT(nn.Module):
         # Input injection adapter: concat(e, s) -> linear -> u
         self.inject = nn.Linear(2 * config.n_embd, config.n_embd, bias=False)
         # Gate projection: cat([e, s]) -> scalar gate per token.
-        # Uses same input as inject so gate sees both the current input and recurrent state.
-        # No bias: forces token-specific gating via weight only.
-        self.gate_proj = nn.Linear(2 * config.n_embd, 1, bias=False)
+        # bias=+2 init (sigmoid(2)≈0.88): gates start open so recur can learn before lambda closes them.
+        # weight=0 init: no token-specific signal at init (clean baseline); weight learns from step 1.
+        self.gate_proj = nn.Linear(2 * config.n_embd, 1, bias=True)
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
         # To support meta device initialization, we init the rotary embeddings here, but it's fake
         # As for rotary_seq_len, these rotary embeddings are pretty small/cheap in memory,
@@ -194,7 +194,10 @@ class GPT(nn.Module):
         with torch.no_grad():
             self.inject.weight.zero_()
             self.inject.weight[:, :n_embd].copy_(torch.eye(n_embd))
-        # gate_proj has no bias — forces token-specific gating via weight only
+        # gate_proj: weight=0 (no token-specific signal at init), bias=+2 (gates start open at sigmoid(2)≈0.88)
+        with torch.no_grad():
+            self.gate_proj.weight.zero_()
+            torch.nn.init.constant_(self.gate_proj.bias, 2.0)
         # init the rotary embeddings
         head_dim = self.config.n_embd // self.config.n_head
         cos, sin = self._precompute_rotary_embeddings(self.rotary_seq_len, head_dim)
@@ -252,7 +255,7 @@ class GPT(nn.Module):
 
             # Params used r times per forward (inside recurrence loop)
             inject_params = self.inject.weight.numel()
-            gate_params = self.gate_proj.weight.numel()
+            gate_params = self.gate_proj.weight.numel() + self.gate_proj.bias.numel()
             recur_params = sum(p.numel() for p in self.transformer.recur.parameters())
             r_times_params = inject_params + gate_params + recur_params
 
