@@ -521,6 +521,35 @@ Previous rejection of leaky gate ("step 0 always forces recur so leaky gate is u
 uv run runpod/launch_mid_sft.py --version v24 --name nanochat-gated-v24
 ```
 
+## Results (mid-training)
+Leaky gate worked structurally — gate started at 0.1 (floor), confirming gate_proj had collapsed-negative bias from a prior loaded checkpoint. Dynamics:
+- **0.1 → 0.99**: CE immediately dominates (λ tiny at ramp start), gate flies open
+- **0.99 → 0.96 → 0.7**: λ increasing during ramp, briefly pulls gate down to 0.7
+- **0.7 → 0.997**: CE adapts representations, gate drifts back to ~1.0; ends mid at 0.997
+
+**Key findings:**
+- Leaky gate breaks the g=0 absorbing state ✓ — gate no longer collapses to floor permanently
+- Gate started at floor (0.1) not 0.89, confirming gate_proj is loaded with very negative bias from the pretrained checkpoint (prior gated training run pushed to HF). init_weights() sets bias=+2, but load_state_dict overwrites it with the checkpoint's collapsed gate_proj.
+- λ=1e-3 is still too weak to hold gate below 1.0 long-term; CE adapts and wins
+- Brief dip to 0.7 during ramp shows an intermediate equilibrium exists — need λ strong enough to maintain it
+
+**Running v25 in parallel** (λ=3e-3, gate_min=0.1) to test whether higher λ finds stable intermediate.
+
+---
+
+# Gated Recursive Training — v25
+Date: 2026-03-20
+
+## Changes vs v24
+- **λ=3e-3** (up from 1e-3): stronger pull toward gate_min=0.1 floor
+- **gate_min=0.1**: same as v24 — keeps g≥0.1, breaks g=0 absorbing state
+- Hypothesis: λ=1e-3 (v24) → gate→1.0; λ=1e-2 (v22) → gate→0.1 floor; λ=3e-3 may find stable intermediate
+
+## Launch command
+```bash
+uv run runpod/launch_mid_sft.py --version v25 --lambda-gate 3e-3 --name nanochat-gated-v25
+```
+
 ---
 
 # Architecture Improvement Ideas
