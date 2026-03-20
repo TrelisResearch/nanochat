@@ -354,9 +354,31 @@ Date: 2026-03-20
 ## Motivation
 λ=1e-2 wins every transition. With λ=1e-3 and no freeze/delay/ramp, CE keeps gates near 0.88 (bias=+2 anchor) while recur learns. As CE decreases, λ gains relative influence and hopefully finds a selective equilibrium. With cat([e,s]) providing real weight gradients from step 1, weight can develop per-token patterns without bias dominating.
 
+## Results
+Gate collapsed to ~0 by step 3. Same failure mode as v15/v16. λ=1e-3 is enough to collapse the gate before recur has learned anything, because sigmoid saturation creates a self-reinforcing fixed point: once g→0, gradient ∝ g*(1-g) → 0, so there is almost no signal to push g back open. λ keeps pushing down; CE can't push back up.
+
+**Root cause confirmed across all versions:** sigmoid g=0 is a near-fixed point. Any λ>0 can collapse the gate before recur is useful, and once collapsed it can't recover because the gradient through sigmoid vanishes.
+
+---
+
+# Gated Recursive Training — v19
+Date: 2026-03-20
+
+## Changes vs v18
+- **Leaky gate:** `g = gate_min + (1 - gate_min) * sigmoid(gate_proj(cat([e, s])))`, with `gate_min=0.1`
+- g ∈ [0.1, 1.0] — model can never fully opt out of recurrence
+- All other settings unchanged: cat([e,s]) gate, bias=+2, weight=0, λ=1e-3 constant, no freeze/delay/ramp
+
+## Motivation
+The sigmoid g=0 fixed point is a structural flaw: once the gate closes, the gradient vanishes and nothing can reopen it. Leaky gate fixes this directly:
+- g ≥ 0.1 always → recur always contributes at least 10% of its update → recur always trains
+- Gradient ∂g/∂x = (1-gate_min)*sigmoid'(x) > 0 always — recovery is always possible
+- λ drives g toward gate_min, not toward 0 — minimum compute, not zero compute
+- Creates a virtuous cycle: recur always trains → becomes useful → CE wants more → equilibrium above gate_min
+
 ## Launch command
 ```bash
-uv run runpod/launch_pretrain.py --version v18 --lambda-gate 1e-3 --name nanochat-gated-v18
+uv run runpod/launch_pretrain.py --version v19 --lambda-gate 1e-3 --name nanochat-gated-v19
 ```
 
 ---
