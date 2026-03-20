@@ -368,6 +368,12 @@ while True:
     if grad_clip_enabled:
         grad_norm_tensor = torch.nn.utils.clip_grad_norm_(orig_model.parameters(), grad_clip)
         grad_norm = grad_norm_tensor.item() # GPU tensor -> CPU float (note: cpu-gpu sync point)
+    # Freeze gate_proj during delay period (λ=0): prevent CE from collapsing gate before recur learns
+    if lambda_t == 0.0:
+        if orig_model.gate_proj.weight.grad is not None:
+            orig_model.gate_proj.weight.grad.zero_()
+        if orig_model.gate_proj.bias is not None and orig_model.gate_proj.bias.grad is not None:
+            orig_model.gate_proj.bias.grad.zero_()
     # step the optimizers
     lrm = get_lr_multiplier(step)
     for opt in optimizers:

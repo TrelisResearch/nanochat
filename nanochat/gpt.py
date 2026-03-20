@@ -37,7 +37,6 @@ class GPTConfig:
     n_coda: int = 2  # number of coda layers
     fixed_k: int = 4  # fixed number of recurrences during training and inference
     gate_threshold: float = 0.01  # early-exit: break when max gate value falls below this (inference only)
-    gate_min: float = 0.1        # leaky gate floor: g = gate_min + (1-gate_min)*sigmoid(...) ∈ [gate_min, 1]
     recur_warm_start: bool = True  # warm-start recurrence from previous token's final state
     bptt_k: int = 4  # truncate backprop to last k recurrences (None = full backprop)
     kv_cache_recur_budget: int = 1  # KV cache slots per position for recurrence (1 = only store final)
@@ -164,10 +163,10 @@ class GPT(nn.Module):
         })
         # Input injection adapter: concat(e, s) -> linear -> u
         self.inject = nn.Linear(2 * config.n_embd, config.n_embd, bias=False)
-        # Gate projection: leaky gate g = gate_min + (1-gate_min)*sigmoid(cat([e,s])) ∈ [gate_min, 1].
-        # Leaky gate prevents g=0 fixed point: gradient always non-zero, λ can only drive g→gate_min.
-        # bias=+2 init (sigmoid(2)≈0.88 → g≈0.92): gates start open so recur can learn.
-        # weight=0 init: no token-specific signal at init (clean baseline); weight learns from step 1.
+        # Gate projection: g = sigmoid(gate_proj(cat([u, s]))) — "given proposed update and current state, recurse?"
+        # cat([u,s]) lets the gate compare proposed vs current state in full vector space (richer than scalar norm(u-s)).
+        # bias=0 init: gates start at sigmoid(0)=0.5 so model co-adapts to partial recurrence during freeze.
+        # weight=0 init: no token-specific signal at init; weight learns once recur produces meaningful u.
         self.gate_proj = nn.Linear(2 * config.n_embd, 1, bias=True)
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
         # To support meta device initialization, we init the rotary embeddings here, but it's fake
@@ -196,10 +195,10 @@ class GPT(nn.Module):
         with torch.no_grad():
             self.inject.weight.zero_()
             self.inject.weight[:, :n_embd].copy_(torch.eye(n_embd))
-        # gate_proj: weight=0 (no token-specific signal at init), bias=+2 (gates start open at sigmoid(2)≈0.88)
+        # gate_proj: weight=0 (no token-specific signal at init), bias=0 (gates start at sigmoid(0)=0.5)
         with torch.no_grad():
             self.gate_proj.weight.zero_()
-            torch.nn.init.constant_(self.gate_proj.bias, 2.0)
+            torch.nn.init.constant_(self.gate_proj.bias, 0.0)
         # init the rotary embeddings
         head_dim = self.config.n_embd // self.config.n_head
         cos, sin = self._precompute_rotary_embeddings(self.rotary_seq_len, head_dim)
@@ -378,10 +377,9 @@ class GPT(nn.Module):
 
         # 4. Gated recurrent block (run num_recur times with fixed K during training)
         # Step 0: always full update (g_eff=1) — full gradients to recur blocks.
-        # Steps 1+: g = sigmoid(gate_proj(cat([e,s]))); gated update; gate_cost accumulated.
-        # Gate uses cat([e,s]) — same input as inject — so it sees both the current input
-        # and recurrent state. After step 0, s is meaningful (not just e), so the gate
-        # has real information. No degeneracy at init (cat([e,s]) always non-zero).
+        # Steps 1+: g = sigmoid(gate_proj(cat([u,s]))); gated update; gate_cost accumulated.
+        # Gate uses cat([u,s]): "given proposed update u and current state s, recurse?"
+        # Richer than scalar norm(u-s) — gate can learn directional patterns, not just magnitude.
         # Structured to avoid if/else branching around tensor ops (torch.compile safe).
         gate_cost = torch.tensor(0.0, device=idx.device)
         B, T = idx.shape
@@ -390,7 +388,7 @@ class GPT(nn.Module):
             u = self.inject(torch.cat([e, s], dim=-1))
             for block in self.transformer.recur:
                 u = block(u, cos_sin, kv_cache)
-            g = self.config.gate_min + (1 - self.config.gate_min) * torch.sigmoid(self.gate_proj(torch.cat([e, s], dim=-1)))  # [B, T, 1], in [gate_min, 1]
+            g = torch.sigmoid(self.gate_proj(torch.cat([u, s], dim=-1)))  # [B, T, 1]
             # Scalar multipliers resolved at trace time (i is a Python int) — no tensor branches.
             # step 0: gate_scale=0 (forced full update, not penalised); steps 1+: gate_scale=1
             gate_scale = 0.0 if i == 0 else 1.0

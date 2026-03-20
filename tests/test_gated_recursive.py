@@ -71,9 +71,9 @@ def test_model_has_gate_proj():
     import torch.nn as nn
     assert isinstance(model.gate_proj, nn.Linear)
     assert model.gate_proj.weight.shape == (1, 2 * model.config.n_embd)
-    assert model.gate_proj.bias is not None, "gate_proj must have bias (initialized to +2 to start gates open)"
+    assert model.gate_proj.bias is not None, "gate_proj must have bias"
     assert model.gate_proj.weight.abs().sum().item() == 0.0, "gate_proj.weight must be zero at init"
-    assert abs(model.gate_proj.bias.item() - 2.0) < 1e-5, "gate_proj.bias must be +2.0 at init (sigmoid(2)≈0.88)"
+    assert abs(model.gate_proj.bias.item() - 0.0) < 1e-5, "gate_proj.bias must be 0.0 at init (sigmoid(0)=0.5)"
 
 
 # ---------------------------------------------------------------------------
@@ -207,8 +207,8 @@ def test_open_gate_produces_nonzero_gate_cost():
 def test_gradients_flow_through_gate():
     """gate_proj.weight must receive a non-zero gradient during training.
 
-    Gate uses cat([e,s]) which is always non-zero, so weight.grad is non-zero
-    from the first step regardless of the inject=[I|0]+c_proj=0 init.
+    Gate uses cat([u,s]) which is always non-zero (u and s are always O(1)),
+    so weight.grad is non-zero from the first step regardless of init.
     """
     model = make_model()
     model.train()
@@ -338,7 +338,7 @@ def test_generate_with_temperature_zero_is_deterministic():
 # ---------------------------------------------------------------------------
 
 def test_gate_uses_state_signal():
-    """Gate output changes when s changes, confirming gate is computed from cat([e,s]).
+    """Gate output changes when s changes, confirming gate is computed from cat([u,s]).
 
     weight=0 at init so we perturb it first — at init gate is constant (bias only).
     """
@@ -348,12 +348,12 @@ def test_gate_uses_state_signal():
     with torch.no_grad():
         model.gate_proj.weight.normal_(0, 0.01)  # perturb so weight contributes
         B, T = 1, 4
-        e = torch.randn(B, T, model.config.n_embd)
+        u = torch.randn(B, T, model.config.n_embd)
         s1 = torch.zeros(B, T, model.config.n_embd)
         s2 = torch.randn(B, T, model.config.n_embd)
-        g1 = torch.sigmoid(model.gate_proj(torch.cat([e, s1], dim=-1)))
-        g2 = torch.sigmoid(model.gate_proj(torch.cat([e, s2], dim=-1)))
-    assert not torch.allclose(g1, g2), "Gate output must differ when s differs (gate depends on cat([e,s]))"
+        g1 = torch.sigmoid(model.gate_proj(torch.cat([u, s1], dim=-1)))
+        g2 = torch.sigmoid(model.gate_proj(torch.cat([u, s2], dim=-1)))
+    assert not torch.allclose(g1, g2), "Gate output must differ when s differs (gate depends on cat([u,s]))"
 
 
 # ---------------------------------------------------------------------------

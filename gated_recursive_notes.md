@@ -374,11 +374,39 @@ The sigmoid g=0 fixed point is a structural flaw: once the gate closes, the grad
 - g ≥ 0.1 always → recur always contributes at least 10% of its update → recur always trains
 - Gradient ∂g/∂x = (1-gate_min)*sigmoid'(x) > 0 always — recovery is always possible
 - λ drives g toward gate_min, not toward 0 — minimum compute, not zero compute
-- Creates a virtuous cycle: recur always trains → becomes useful → CE wants more → equilibrium above gate_min
+
+## Results
+Leaky gate doesn't address the root cause. Step 0 is always forced, so recur already always trains regardless of gate state. The leaky gate just floors gate_mean at 0.1 without changing the underlying incentive structure. Killed early.
+
+**Root cause of all collapses:** CE has no incentive to keep gated steps (1+) open — step 0 already provides the recurrence benefit. The gate input signal also matters: norm(u-s) is structurally limited to a scalar convergence measure and cannot distinguish token difficulty, which is why v13 found a global bias equilibrium (all tokens same gate value) rather than per-token selectivity.
+
+---
+
+# Gated Recursive Training — v20
+Date: 2026-03-20
+
+## Changes vs v19
+- **Gate input: cat([u, s])** — "given proposed update and current state, should I recurse?"
+  - Richer than norm(u-s): gate sees full vector space of u vs s, not just scalar magnitude
+  - Can learn directional patterns that distinguish token difficulty (hard reasoning vs simple tokens)
+  - norm(u-s) was structurally limited to global equilibrium; cat([u,s]) enables per-token selectivity
+- **bias=0 init**: gates start at sigmoid(0)=0.5 during freeze period
+  - Model co-adapts to partial recurrence (not nearly-full like bias=+2)
+  - On unfreeze CE doesn't strongly pull toward 1.0 (v12 failure mode)
+  - λ=1e-2 starts from 0.5, needs less distance to find equilibrium
+- **Restore freeze** (gate_delay_ratio=0.2): gate_proj frozen while recur learns
+- **Restore ramp** (gate_ramp_ratio=0.2): λ ramps gradually after freeze lifts
+- **λ=1e-2**: same as v13 which found a partial equilibrium (0.667); now with better gate input
+
+## Expected behaviour
+- During freeze: gate stable at 0.5 (sigmoid(0)); recur learns useful representations
+- After unfreeze: weight starts learning from cat([u,s]) signal
+- λ=1e-2 + ramp finds an equilibrium that is per-token selective (unlike v13's global bias equilibrium)
+- gate_mean should vary by task difficulty at eval
 
 ## Launch command
 ```bash
-uv run runpod/launch_pretrain.py --version v19 --lambda-gate 1e-3 --name nanochat-gated-v19
+uv run runpod/launch_pretrain.py --version v20 --lambda-gate 1e-2 --name nanochat-gated-v20
 ```
 
 ---
