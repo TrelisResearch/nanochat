@@ -52,6 +52,7 @@ dry_run = 0 # dry_run=1 is for experiments: we will log to wandb but we won't wr
 lambda_gate = 1e-3 # sparsity penalty weight on total gate activation
 gate_delay_ratio = 0.2 # fraction of training where λ=0; gate_proj frozen during this period
 gate_ramp_ratio = 0.2   # fraction of training steps to ramp λ from 0→lambda_gate; plateaus for remainder
+gate_min = 0.0          # leaky gate floor: g = gate_min + (1-gate_min)*sigmoid(...); 0.1 prevents g=0 absorbing state
 config_keys = [k for k,v in globals().items() if not k.startswith('_') and isinstance(v, (int, float, bool, str))]
 exec(open(os.path.join('nanochat', 'configurator.py')).read()) # overrides from command line or config file
 user_config = {k: globals()[k] for k in config_keys} # possibly useful for logging
@@ -75,6 +76,7 @@ pretrain_batch_size = meta.get("device_batch_size", None)
 if pretrain_batch_size is not None and device_batch_size > pretrain_batch_size:
     print0(f"FOOTGUN WARNING: base model training used device_batch_size {pretrain_batch_size}, did you pass in a good --device_batch_size to this script?")
 orig_model = model
+orig_model.config.gate_min = gate_min
 model = torch.compile(model, dynamic=False)
 depth = model.config.n_layer
 num_flops_per_token = model.estimate_flops()

@@ -496,6 +496,31 @@ With sigmoid bistability, 3e-3 may also collapse to 0 or 1 rather than finding a
 uv run runpod/launch_mid_sft.py --version v23 --lambda-gate 3e-3 --name nanochat-gated-v23
 ```
 
+## Results
+Collapsed to ~0 (gate_mean ≈ 5e-4), slightly less extreme than v22 but same failure mode. Confirms sigmoid bistability is structural — there is no stable middle-ground equilibrium with this gate parameterisation.
+
+---
+
+# Gated Recursive Training — v24
+Date: 2026-03-20
+
+## Changes vs v23
+- **gate_min=0.1**: leaky gate floor — g = 0.1 + 0.9*sigmoid(...) ∈ [0.1, 1.0]
+  - Breaks the g=0 absorbing state: gradient ∂g/∂x = 0.9*sigmoid'(x) > 0 always
+  - λ drives g toward 0.1 (minimum compute), not toward 0 (zero compute)
+  - g=0.1 is the new floor — CE always sees some recurrence gradient, can push back up
+- **λ=1e-3**: back to conservative value now that g=0 absorbing state is gone
+- **gate_min configurable via --gate-min arg** in launch_mid_sft.py
+- **λ configurable default reset to 1e-3** in launch_mid_sft.py
+
+## Framing
+Previous rejection of leaky gate ("step 0 always forces recur so leaky gate is useless") was correct for the CE-indifference failure mode in from-scratch training. This is a different failure mode: sigmoid bistability in pretrained-checkpoint mid-training. Leaky gate prevents the g=0 dead zone regardless of CE direction.
+
+## Launch command
+```bash
+uv run runpod/launch_mid_sft.py --version v24 --name nanochat-gated-v24
+```
+
 ---
 
 # Architecture Improvement Ideas

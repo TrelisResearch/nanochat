@@ -59,6 +59,7 @@ eval_metrics_max_problems = 1024
 lambda_gate = 1e-3 # sparsity penalty weight on total gate activation
 gate_delay_ratio = 0.0 # fraction of training where λ=0 (gates already trained from base_train)
 gate_ramp_ratio = 0.2   # fraction of training steps to ramp λ from 0→lambda_gate; plateaus for remainder
+gate_min = 0.0          # leaky gate floor: g = gate_min + (1-gate_min)*sigmoid(...); 0.1 prevents g=0 absorbing state
 # now allow CLI to override the settings via the configurator lol
 config_keys = [k for k,v in globals().items() if not k.startswith('_') and isinstance(v, (int, float, bool, str))]
 exec(open(os.path.join('nanochat', 'configurator.py')).read()) # overrides from command line or config file
@@ -79,6 +80,7 @@ wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(project="nanochat-sf
 # Load the model and tokenizer
 model, tokenizer, meta = load_model(source, device, phase="train", model_tag=model_tag, step=step)
 orig_model = model # original, uncompiled model
+orig_model.config.gate_min = gate_min
 # model = torch.compile(model, dynamic=True) # doesn't work super well because of variable lengths of inputs
 engine = Engine(model, tokenizer) # will be used for inline model evaluation only
 
