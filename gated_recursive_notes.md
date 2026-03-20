@@ -630,3 +630,16 @@ The goal is **not** to beat d20 overall (fewer unique weights makes that unlikel
 
 If this signal is present, the architecture is demonstrating dynamic compute allocation — a meaningful research result independent of aggregate benchmark scores. Follow-on: log gate_mean **per eval task** rather than just globally.
 
+
+---
+
+# Pod Infrastructure Next Steps
+
+## 1. Fix SSH access
+Current workaround (`-tt` + stdin pipe via gateway) is fragile and doesn't allow proper log tailing or interactive control. Diagnose and get clean SSH working so we can `ssh pod` and run commands normally — tail logs, inspect checkpoints, etc.
+
+## 2. Re-use pods instead of restarting
+Currently: each experiment = new pod launch. Should instead: SSH into a running pod, `git pull`, and re-run the training script directly. Faster iteration, no re-setup overhead.
+
+## 3. Investigate pod auto-shutdown from scratch
+Current self-terminate approach (curl DELETE in dockerStartCmd) is unreliable and couples the training script to pod lifecycle. Pods are also restarting and re-running training, overwriting previous results. This whole approach needs rethinking — likely needs a supervisor/wrapper process that terminates the pod cleanly after training exits, rather than relying on the training script itself.
