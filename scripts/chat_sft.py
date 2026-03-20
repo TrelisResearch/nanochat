@@ -247,6 +247,13 @@ for step in range(num_iterations):
         for group in opt.param_groups:
             group["lr"] = group["initial_lr"] * lrm
 
+    # Freeze gate_proj during delay period (λ=0): prevent CE from collapsing gate before recur learns
+    if lambda_t == 0.0:
+        if orig_model.gate_proj.weight.grad is not None:
+            orig_model.gate_proj.weight.grad.zero_()
+        if orig_model.gate_proj.bias is not None and orig_model.gate_proj.bias.grad is not None:
+            orig_model.gate_proj.bias.grad.zero_()
+
     # step the optimizers
     for opt in optimizers:
         opt.step()

@@ -50,7 +50,7 @@ total_batch_size = 524288
 dry_run = 0 # dry_run=1 is for experiments: we will log to wandb but we won't write checkpoints or report
 # Gated recursion config
 lambda_gate = 1e-3 # sparsity penalty weight on total gate activation
-gate_delay_ratio = 0.0 # fraction of training where λ=0 (gates already trained from base_train)
+gate_delay_ratio = 0.2 # fraction of training where λ=0; gate_proj frozen during this period
 gate_ramp_ratio = 0.2   # fraction of training steps to ramp λ from 0→lambda_gate; plateaus for remainder
 config_keys = [k for k,v in globals().items() if not k.startswith('_') and isinstance(v, (int, float, bool, str))]
 exec(open(os.path.join('nanochat', 'configurator.py')).read()) # overrides from command line or config file
@@ -261,6 +261,12 @@ while True:
         gated_loss.backward()
         x, y = next(train_loader) # prefetch the next batch while the GPU is busy with forward/backward
         progress = max(progress, approx_progress) # only increase progress monotonically
+    # Freeze gate_proj during delay period (λ=0): prevent CE from collapsing gate before recur learns
+    if lambda_t == 0.0:
+        if orig_model.gate_proj.weight.grad is not None:
+            orig_model.gate_proj.weight.grad.zero_()
+        if orig_model.gate_proj.bias is not None and orig_model.gate_proj.bias.grad is not None:
+            orig_model.gate_proj.bias.grad.zero_()
     # step the optimizers
     lrm = get_lr_multiplier(progress)
     for opt in optimizers:

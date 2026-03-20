@@ -92,14 +92,14 @@ TRAIN_CMD = textwrap.dedent("""\
 
     # Mid-training with gated loss (device_batch_size=32: gradient checkpointing eliminates OOM)
     torchrun --standalone --nproc_per_node=8 -m scripts.mid_train -- \\
-      --run=gated-recursive-mid \\
+      --run=gated-recursive-mid-{version} \\
       --lambda_gate=1e-3 \\
       --gate_delay_ratio=0.2 \\
       --device_batch_size=32
 
     # SFT with gated loss
     torchrun --standalone --nproc_per_node=8 -m scripts.chat_sft -- \\
-      --run=gated-recursive-sft \\
+      --run=gated-recursive-sft-{version} \\
       --source=mid \\
       --lambda_gate=1e-3 \\
       --gate_delay_ratio=0.2
@@ -108,7 +108,7 @@ TRAIN_CMD = textwrap.dedent("""\
     python -m scripts.push_to_hf \\
       --stage sft \\
       --repo-id Trelis/nanochat-gated-recursive \\
-      --path-in-repo sft/d20
+      --path-in-repo sft/d20-{version}
 
     # Self-terminate pod so RunPod doesn't restart the container
     curl -s -X DELETE -H "Authorization: Bearer ${RUNPOD_API_KEY}" \
@@ -140,6 +140,7 @@ def main():
 
     parser = argparse.ArgumentParser(description="Launch gated-recursive mid+SFT on RunPod")
     parser.add_argument("--name",    default="nanochat-gated-mid-sft")
+    parser.add_argument("--version", default="", help="Run version tag appended to W&B run names (e.g. v21)")
     parser.add_argument("--branch",  default="gated-recursive")
     parser.add_argument("--gpus",    type=int, default=cfg.GPU_COUNT)
     parser.add_argument("--image",   default=cfg.IMAGE)
@@ -158,7 +159,8 @@ def main():
 
     env = {"NANOCHAT_BRANCH": args.branch}
     for k in ["WANDB_API_KEY", "HUGGING_FACE_HUB_TOKEN", "GITHUB_PAT",
-              "GIT_USER_NAME", "GIT_USER_EMAIL", "HF_HUB_ENABLE_HF_TRANSFER"]:
+              "GIT_USER_NAME", "GIT_USER_EMAIL", "HF_HUB_ENABLE_HF_TRANSFER",
+              "RUNPOD_API_KEY"]:
         env.update(fwd(k))
 
     pod_config = {
@@ -173,10 +175,10 @@ def main():
         "ports": cfg.PORTS,
         "supportPublicIp": True,
         "env": env,
-        "dockerStartCmd": ["bash", "-c", TRAIN_CMD],
+        "dockerStartCmd": ["bash", "-c", TRAIN_CMD.replace("{version}", args.version)],
     }
 
-    print(f"Launching '{args.name}': mid+SFT on {args.gpus}×GPU, branch={args.branch}")
+    print(f"Launching '{args.name}' (version={args.version or 'unset'}): mid+SFT on {args.gpus}×GPU, branch={args.branch}")
     result = create_pod(api_key, pod_config, dry_run=args.dry_run)
     if result:
         print(f"Pod created: id={result.get('id')}  cost=${result.get('costPerHr')}/hr")

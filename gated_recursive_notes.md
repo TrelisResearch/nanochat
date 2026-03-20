@@ -414,6 +414,38 @@ uv run runpod/launch_pretrain.py --version v20 --lambda-gate 1e-2 --name nanocha
 
 ---
 
+# Gated Recursive Training — v21
+Date: 2026-03-20
+
+## Changes vs v20
+- **Gate input: cat([u, s])** — same as v20 (keep)
+- **bias=+2 init**: gates start at sigmoid(2)≈0.88 (near-open), not 0.5
+  - Pretrained model co-adapted to full recurrence (fixed_k=4 throughout pre-training)
+  - bias=+2 is closer to what pretrained model expects, causes less disruption
+  - λ drives toward selective equilibrium from open, not from 0.5
+- **weight=0 init**: no token-specific signal at init, weight learns once recur produces meaningful u
+- **Freeze gate_proj during delay (gate_delay_ratio=0.2)**: λ=0 and gate frozen for first 20%
+  - Prevents CE from collapsing gate before recur has learned to produce useful u
+- **gate_ramp_ratio=0.2**: λ ramps from 0→1e-3 over next 20%
+- **λ=1e-3 constant**: gentler than v20's 1e-2; targets ~0.10 equilibrium seen in pre-v11 runs
+- **MID+SFT ONLY from pretrained checkpoint**: `Trelis/nanochat-recursive` base
+  - All pre-v11 successes (~0.10 equilibrium) were mid+SFT from pretrained checkpoint
+  - From-scratch pre-training always collapses gate before recur learns: u≈s at init (c_proj=0), CE indifferent, λ wins
+  - Pretrained model has meaningful u≠s from step 1 → gate gets real per-token signal immediately
+
+## Motivation
+Three consecutive pre-v11 runs showed gate_mean ~0.10 in mid-training — a robust attractor. All from mid-training of `Trelis/nanochat-recursive`. v11 "fix" broke this. v21 replicates those conditions with cat([u,s]) instead of norm(u-s) and adds bias=+2/freeze/ramp.
+
+## Pod restart bug fix (v21)
+RUNPOD_API_KEY was not forwarded to pod in launch_mid_sft.py → self-terminate curl failed silently → pod restarted and re-ran training. Fixed: RUNPOD_API_KEY now forwarded in env.
+
+## Launch command
+```bash
+uv run runpod/launch_mid_sft.py --version v21 --name nanochat-gated-v21
+```
+
+---
+
 # Architecture Improvement Ideas
 
 Two candidates for step 11:

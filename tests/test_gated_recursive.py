@@ -73,7 +73,7 @@ def test_model_has_gate_proj():
     assert model.gate_proj.weight.shape == (1, 2 * model.config.n_embd)
     assert model.gate_proj.bias is not None, "gate_proj must have bias"
     assert model.gate_proj.weight.abs().sum().item() == 0.0, "gate_proj.weight must be zero at init"
-    assert abs(model.gate_proj.bias.item() - 0.0) < 1e-5, "gate_proj.bias must be 0.0 at init (sigmoid(0)=0.5)"
+    assert abs(model.gate_proj.bias.item() - 2.0) < 1e-5, "gate_proj.bias must be +2.0 at init (sigmoid(2)≈0.88, gates start open)"
 
 
 # ---------------------------------------------------------------------------

@@ -165,7 +165,7 @@ class GPT(nn.Module):
         self.inject = nn.Linear(2 * config.n_embd, config.n_embd, bias=False)
         # Gate projection: g = sigmoid(gate_proj(cat([u, s]))) — "given proposed update and current state, recurse?"
         # cat([u,s]) lets the gate compare proposed vs current state in full vector space (richer than scalar norm(u-s)).
-        # bias=0 init: gates start at sigmoid(0)=0.5 so model co-adapts to partial recurrence during freeze.
+        # bias=+2 init: gates start open (sigmoid(2)≈0.88) so model starts near full recurrence during freeze.
         # weight=0 init: no token-specific signal at init; weight learns once recur produces meaningful u.
         self.gate_proj = nn.Linear(2 * config.n_embd, 1, bias=True)
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
@@ -195,10 +195,10 @@ class GPT(nn.Module):
         with torch.no_grad():
             self.inject.weight.zero_()
             self.inject.weight[:, :n_embd].copy_(torch.eye(n_embd))
-        # gate_proj: weight=0 (no token-specific signal at init), bias=0 (gates start at sigmoid(0)=0.5)
+        # gate_proj: weight=0 (no token-specific signal at init), bias=+2 (gates start open at sigmoid(2)≈0.88)
         with torch.no_grad():
             self.gate_proj.weight.zero_()
-            torch.nn.init.constant_(self.gate_proj.bias, 0.0)
+            torch.nn.init.constant_(self.gate_proj.bias, 2.0)
         # init the rotary embeddings
         head_dim = self.config.n_embd // self.config.n_head
         cos, sin = self._precompute_rotary_embeddings(self.rotary_seq_len, head_dim)
