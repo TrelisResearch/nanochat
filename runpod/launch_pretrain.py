@@ -95,7 +95,8 @@ TRAIN_CMD_TEMPLATE = textwrap.dedent("""\
     torchrun --standalone --nproc_per_node=8 -m scripts.base_train -- \\
       --run=gated-recursive-pretrain-{version} \\
       --lambda_gate={lambda_gate} \\
-      --gate_delay_ratio=0.2 \\
+      --gate_delay_ratio=0.0 \\
+      --gate_ramp_ratio=0.0 \\
       --target_param_data_ratio=20 \\
       --warmdown_ratio=0.2
 

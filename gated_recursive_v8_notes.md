@@ -339,9 +339,24 @@ Date: 2026-03-20
 ## Motivation
 CE alone collapses the gate during the delay period — bias=+2 is not enough resistance. Freeze locks gate_proj at init (0.88) while recur learns. When λ kicks in and gate unfreezes, CE and λ act together to find a real equilibrium. Now with cat([e,s]), the weight has a rich input signal to learn token-specific patterns, unlike v12/v13 where norm(u-s)≈0 caused global equilibrium.
 
+## Results
+Gate slammed to 0 immediately on unfreeze. λ=1e-2 dominates at the moment of unfreeze, collapses the gate before CE can establish per-token patterns.
+
+---
+
+# Gated Recursive Training — v18
+Date: 2026-03-20
+
+## Changes vs v17
+- Drop freeze, delay, and ramp entirely — maximum simplicity
+- λ=1e-3 constant from step 1 (10× weaker than v17)
+
+## Motivation
+λ=1e-2 wins every transition. With λ=1e-3 and no freeze/delay/ramp, CE keeps gates near 0.88 (bias=+2 anchor) while recur learns. As CE decreases, λ gains relative influence and hopefully finds a selective equilibrium. With cat([e,s]) providing real weight gradients from step 1, weight can develop per-token patterns without bias dominating.
+
 ## Launch command
 ```bash
-uv run runpod/launch_pretrain.py --version v17 --lambda-gate 1e-2 --name nanochat-gated-v17
+uv run runpod/launch_pretrain.py --version v18 --lambda-gate 1e-3 --name nanochat-gated-v18
 ```
 
 ---
