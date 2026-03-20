@@ -557,6 +557,14 @@ Date: 2026-03-20
 uv run runpod/launch_mid_sft.py --version v25 --lambda-gate 3e-3 --name nanochat-gated-v25
 ```
 
+## Results (mid-training)
+Gate stayed at 0.1 (the gate_min floor) throughout mid-training — λ=3e-3 strong enough to keep gate pinned to floor. As degenerate as gate→1.0: model always uses minimum compute.
+
+## Results (SFT)
+SFT did not run — unknown reason (pod issue or mid-training failure). Pod terminated.
+
+**Conclusion:** λ=3e-3 + gate_min=0.1 → gate pinned to floor. Together with v24 (λ=1e-3 → gate→1.0), the intermediate equilibrium λ lies in a narrow band between 1e-3 and 3e-3. Next candidate: λ=2e-3.
+
 ---
 
 # Architecture Improvement Ideas
