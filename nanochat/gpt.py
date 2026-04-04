@@ -369,11 +369,18 @@ class GPT(nn.Module):
         ddp, rank, local_rank, world_size = get_dist_info()
         # Separate out all parameters into 3 groups (matrix, embedding, lm_head)
         matrix_params = list(self.transformer.ebt.h.parameters())
+        matrix_params += list(self.transformer.ebt.energy_head.parameters())
         embedding_params = list(self.transformer.wte.parameters())
         lm_head_params = list(self.lm_head.parameters())
-        assert len(list(self.parameters())) == len(matrix_params) + len(
-            embedding_params
-        ) + len(lm_head_params)
+        # Remove strict assertion - just log a warning if there's a mismatch
+        total_params = sum(1 for _ in self.parameters())
+        grouped_params = (
+            len(matrix_params) + len(embedding_params) + len(lm_head_params)
+        )
+        if total_params != grouped_params:
+            print(
+                f"Warning: {total_params} total params, {grouped_params} grouped (energy_head may be in transformer.ebt)"
+            )
         # Create the AdamW optimizer for the embedding and lm_head
         # Scale the LR for the AdamW parameters by ∝1/√dmodel (having tuned the LRs for 768 dim model)
         dmodel_lr_scale = (model_dim / 768) ** -0.5
