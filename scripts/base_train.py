@@ -51,7 +51,7 @@ device_type = ""  # cuda|cpu|mps (empty => autodetect good device type default, 
 depth = (
     40  # the depth of the Transformer model to train, rest of the kwargs are derived
 )
-use_flash_attn = False
+use_flash_attn = True
 n_steps = 2
 opt_step_size = 0.8
 max_seq_len = 2048  # max context length
@@ -193,9 +193,10 @@ if resuming:
     del model_data  # free up this memory after the copy
 
 orig_model = model  # original, uncompiled model, for saving raw model state_dict and for inference/evaluation (because the shapes may change shape)
-model = torch.compile(
-    model, dynamic=False
-)  # the inputs to model will never change shape so dynamic=False is safe
+if model_config.n_steps <= 1:
+    model = torch.compile(
+        model, dynamic=False
+    )  # the inputs to model will never change shape so dynamic=False is safe
 num_params = sum(p.numel() for p in model.parameters())
 print0(f"Number of parameters: {num_params:,}")
 num_flops_per_token = model.estimate_flops()

@@ -23,7 +23,7 @@ import torch.nn.functional as F
 from nanochat.common import get_dist_info
 from nanochat.muon import Muon, DistMuon
 from nanochat.adamw import DistAdamW
-# from jvp_flash_attention.jvp_attention import attention as jvp_attention
+from jvp_flash_attention.jvp_attention import attention as jvp_attention
 
 
 @dataclass
@@ -119,24 +119,27 @@ class CausalSelfAttention(nn.Module):
             self.n_head != self.n_kv_head
         )  # Group Query Attention (GQA): duplicate key/value heads to match query heads if desired
         assert not enable_gqa, "GQA not implemented in Energy Transformer"
-        assert Tq > 1, (
-            "Inference with single query not implemented in Energy Transformer"
-        )
-        assert kv_cache is None, "KV cache not implemented in Energy Tranformer"
 
         # Computing custom mask for Energy Transformers
-        causal_mask = torch.tril(torch.ones(S, S, device=q.device))  # .view(1, 1, T, T)
-        eye_mask = torch.eye(S, device=q.device)
-        zero_mask = torch.zeros_like(causal_mask, device=q.device)
-        attn_mask = torch.concat(
-            [
-                torch.concat([causal_mask, zero_mask], dim=1),
-                torch.concat([causal_mask, eye_mask], dim=1),
-            ],
-            dim=0,
-        ).view(1, 1, T, T)
+        if kv_cache is not None:
+            # During generation with kv_cache: causal mask over all keys (cached + current)
+            attn_mask = torch.tril(torch.ones(Tq, Tk, device=q.device)).view(
+                1, 1, Tq, Tk
+            )
+        else:
+            # Full [input, output] sequence: EBT-specific mask
+            causal_mask = torch.tril(torch.ones(S, S, device=q.device))
+            eye_mask = torch.eye(S, device=q.device)
+            zero_mask = torch.zeros_like(causal_mask, device=q.device)
+            attn_mask = torch.concat(
+                [
+                    torch.concat([causal_mask, zero_mask], dim=1),
+                    torch.concat([causal_mask, eye_mask], dim=1),
+                ],
+                dim=0,
+            ).view(1, 1, T, T)
 
-        if not self.use_flash_attn:
+        if not self.use_flash_attn or Tq != Tk:
             # Vanilla attention implemented in pytorch
             attn_scores = torch.matmul(q, k.transpose(-2, -1))
             attn_scores = attn_scores / math.sqrt(self.head_dim)
@@ -425,9 +428,33 @@ class GPT(nn.Module):
 
         # Forward the trunk of the Transformer
         x = self.transformer.wte(idx)
+        # Pad sequence to be divisible by BLOCK_MIN=32 for jvp flash attention
+        BLOCK_MIN = 32
+        if T % BLOCK_MIN != 0:
+            pad_len = BLOCK_MIN - (T % BLOCK_MIN)
+            x = torch.cat(
+                [
+                    x,
+                    torch.zeros(B, pad_len, x.size(-1), device=x.device, dtype=x.dtype),
+                ],
+                dim=1,
+            )
+            cos_pad = self.cos[:, T : T + pad_len]
+            sin_pad = self.sin[:, T : T + pad_len]
+            cos_sin = (
+                torch.cat([cos_sin[0], cos_pad], dim=1),
+                torch.cat([cos_sin[1], sin_pad], dim=1),
+            )
         x = self._ebt_optimization(
-            x, cos_sin, self.config.n_steps, self.config.opt_step_size
+            x,
+            cos_sin,
+            self.config.n_steps,
+            self.config.opt_step_size,
+            create_graph=torch.is_grad_enabled(),
         )
+        # Trim padding if it was added
+        if T % BLOCK_MIN != 0:
+            x = x[:, :T, :]
 
         # Forward the lm_head (compute logits)
         softcap = 15
@@ -450,7 +477,9 @@ class GPT(nn.Module):
             logits = softcap * torch.tanh(logits / softcap)  # logits softcap
             return logits
 
-    def _ebt_optimization(self, input, cos_sin, n_steps, opt_step_size):
+    def _ebt_optimization(
+        self, input, cos_sin, n_steps, opt_step_size, create_graph=True
+    ):
         # Gaussian initialization N(0, I) per paper (Algorithm 1)
         output = torch.randn_like(input)
         x = torch.concat([input, output], dim=1)
@@ -460,6 +489,7 @@ class GPT(nn.Module):
         n_steps = random.randint(2, 3)
 
         with torch.set_grad_enabled(True):
+            x = x.clone().requires_grad_(True)
             for _ in range(n_steps):
                 # Random step size multiplier (1-2x) per paper
                 step_multiplier = random.uniform(1.0, 2.0)
@@ -469,7 +499,7 @@ class GPT(nn.Module):
                 grad = torch.autograd.grad(
                     energy,
                     x,
-                    create_graph=True,
+                    create_graph=create_graph,
                 )[0]
                 grad[:, :S, :] = 0
 
