@@ -12,6 +12,7 @@ Notable features:
 """
 
 import math
+import random
 from functools import partial
 from dataclasses import dataclass
 
@@ -35,7 +36,7 @@ class GPTConfig:
     n_embd: int = 768
     use_flash_attn: bool = False
     n_steps: int = 1
-    opt_step_size: float = 0.8
+    opt_step_size: float = 5  # EBT step size (paper recommends 5 for text)
 
 
 def norm(x):
@@ -443,12 +444,20 @@ class GPT(nn.Module):
             return logits
 
     def _ebt_optimization(self, input, cos_sin, n_steps, opt_step_size):
-        output = torch.rand_like(input)
+        # Gaussian initialization N(0, I) per paper (Algorithm 1)
+        output = torch.randn_like(input)
         x = torch.concat([input, output], dim=1)
         _, S, _ = input.shape
 
+        # Randomized number of steps (2-3 per paper)
+        n_steps = random.randint(2, 3)
+
         with torch.set_grad_enabled(True):
             for _ in range(n_steps):
+                # Random step size multiplier (1-2x) per paper
+                step_multiplier = random.uniform(1.0, 2.0)
+                effective_step_size = opt_step_size * step_multiplier
+
                 energy = self.transformer.ebt(x, cos_sin)[:, S:, :].sum()
                 grad = torch.autograd.grad(
                     energy,
@@ -456,7 +465,12 @@ class GPT(nn.Module):
                     create_graph=True,
                 )[0]
                 grad[:, :S, :] = 0
-                x = x - opt_step_size * grad
+
+                # Update predictions
+                x = x - effective_step_size * grad
+
+                # Apply softmax normalization for stability (per paper)
+                x = torch.concat([x[:, :S, :], F.softmax(x[:, S:, :], dim=-1)], dim=1)
 
         return x[:, S:, :]
 
