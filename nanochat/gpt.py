@@ -37,6 +37,7 @@ class GPTConfig:
     use_flash_attn: bool = False
     n_steps: int = 1
     opt_step_size: float = 5  # EBT step size (paper recommends 5 for text)
+    langevin_noise: float = 0.0  # Langevin dynamics noise std (paper Eq. 2)
 
 
 def norm(x):
@@ -236,6 +237,7 @@ class GPT(nn.Module):
             }
         )
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+        self.vocab_to_embed = nn.Linear(config.vocab_size, config.n_embd, bias=False)
         # To support meta device initialization, we init the rotary embeddings here, but it's fake
         # As for rotary_seq_len, these rotary embeddings are pretty small/cheap in memory,
         # so let's just over-compute them, but assert fail if we ever reach that amount.
@@ -259,6 +261,7 @@ class GPT(nn.Module):
         for block in self.transformer.ebt.h:
             torch.nn.init.zeros_(block.mlp.c_proj.weight)
             torch.nn.init.zeros_(block.attn.c_proj.weight)
+        # vocab_to_embed uses default Kaiming init from _init_weights (NOT zero-init)
         # init the rotary embeddings
         head_dim = self.config.n_embd // self.config.n_head
         cos, sin = self._precompute_rotary_embeddings(self.rotary_seq_len, head_dim)
@@ -373,6 +376,7 @@ class GPT(nn.Module):
         # Separate out all parameters into 3 groups (matrix, embedding, lm_head)
         matrix_params = list(self.transformer.ebt.h.parameters())
         matrix_params += list(self.transformer.ebt.energy_head.parameters())
+        matrix_params += list(self.vocab_to_embed.parameters())
         embedding_params = list(self.transformer.wte.parameters())
         lm_head_params = list(self.lm_head.parameters())
         # Remove strict assertion - just log a warning if there's a mismatch
@@ -478,38 +482,55 @@ class GPT(nn.Module):
             return logits
 
     def _ebt_optimization(
-        self, input, cos_sin, n_steps, opt_step_size, create_graph=True
+        self, input_embeddings, cos_sin, n_steps, opt_step_size, create_graph=True
     ):
-        # Gaussian initialization N(0, I) per paper (Algorithm 1)
-        output = torch.randn_like(input)
-        x = torch.concat([input, output], dim=1)
-        _, S, _ = input.shape
+        B, S, D = input_embeddings.shape
+        V = self.config.vocab_size
+
+        # Initialize logits from N(0, I) per paper (Algorithm 1) — shape (B, S, V)
+        predicted_logits = torch.randn(
+            B, S, V, device=input_embeddings.device, dtype=input_embeddings.dtype
+        )
 
         # Randomized number of steps (2-3 per paper)
         n_steps = random.randint(2, 3)
 
         with torch.set_grad_enabled(True):
-            x = x.clone().requires_grad_(True)
+            predicted_logits = predicted_logits.requires_grad_(True)
             for _ in range(n_steps):
+                # Add Langevin noise per paper (Eq. 2)
+                if self.config.langevin_noise > 0:
+                    predicted_logits = (
+                        predicted_logits
+                        + self.config.langevin_noise
+                        * torch.randn_like(predicted_logits)
+                    )
+
                 # Random step size multiplier (1-2x) per paper
                 step_multiplier = random.uniform(1.0, 2.0)
                 effective_step_size = opt_step_size * step_multiplier
 
-                energy = self.transformer.ebt(x, cos_sin)[:, S:, :].sum()
+                # Softmax + vocab_to_embed → predicted embeddings
+                predicted_probs = F.softmax(predicted_logits, dim=-1)
+                predicted_embeddings = self.vocab_to_embed(predicted_probs)  # (B, S, D)
+
+                # Concatenate: real input + predicted
+                all_embeddings = torch.cat(
+                    [input_embeddings, predicted_embeddings], dim=1
+                )  # (B, 2S, D)
+
+                # Get energy from the output half
+                energy = self.transformer.ebt(all_embeddings, cos_sin)[:, S:, :].sum()
                 grad = torch.autograd.grad(
-                    energy,
-                    x,
-                    create_graph=create_graph,
+                    energy, predicted_logits, create_graph=create_graph
                 )[0]
-                grad[:, :S, :] = 0
 
-                # Update predictions
-                x = x - effective_step_size * grad
+                # Update logits
+                predicted_logits = predicted_logits - effective_step_size * grad
 
-                # Apply softmax normalization for stability (per paper)
-                x = torch.concat([x[:, :S, :], F.softmax(x[:, S:, :], dim=-1)], dim=1)
-
-        return x[:, S:, :]
+        # Return the final predicted embeddings (for lm_head downstream)
+        final_probs = F.softmax(predicted_logits, dim=-1)
+        return self.vocab_to_embed(final_probs)  # (B, S, D)
 
     @torch.inference_mode()
     def generate(self, tokens, max_tokens, temperature=1.0, top_k=None, seed=42):
