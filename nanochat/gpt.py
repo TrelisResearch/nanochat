@@ -449,13 +449,32 @@ class GPT(nn.Module):
                 torch.cat([cos_sin[0], cos_pad], dim=1),
                 torch.cat([cos_sin[1], sin_pad], dim=1),
             )
-        x = self._ebt_optimization(
-            x,
-            cos_sin,
-            self.config.n_steps,
-            self.config.opt_step_size,
-            create_graph=torch.is_grad_enabled(),
-        )
+        
+        # Run EBT optimization - returns embeddings and optionally losses
+        if targets is not None:
+            # Training mode: compute losses at each MCMC step
+            x, step_losses = self._ebt_optimization(
+                x,
+                cos_sin,
+                self.config.n_steps,
+                self.config.opt_step_size,
+                create_graph=torch.is_grad_enabled(),
+                targets=targets,
+                original_seq_len=T,
+            )
+        else:
+            # Inference mode: no loss computation
+            x = self._ebt_optimization(
+                x,
+                cos_sin,
+                self.config.n_steps,
+                self.config.opt_step_size,
+                create_graph=False,
+                targets=None,
+                original_seq_len=T,
+            )
+            step_losses = None
+        
         # Trim padding if it was added
         if T % BLOCK_MIN != 0:
             x = x[:, :T, :]
@@ -463,18 +482,9 @@ class GPT(nn.Module):
         # Forward the lm_head (compute logits)
         softcap = 15
         if targets is not None:
-            # training mode: compute and return the loss
-            # TODO: experiment with Liger Kernels / chunked cross-entropy etc.
-            logits = self.lm_head(x)
-            logits = softcap * torch.tanh(logits / softcap)  # logits softcap
-            logits = logits.float()  # use tf32/fp32 for logits
-            loss = F.cross_entropy(
-                logits.view(-1, logits.size(-1)),
-                targets.view(-1),
-                ignore_index=-1,
-                reduction=loss_reduction,
-            )
-            return loss
+            # training mode: return averaged loss from all MCMC steps
+            # The losses are already computed during optimization
+            return step_losses
         else:
             # inference mode: compute and return the logits
             logits = self.lm_head(x)
@@ -482,7 +492,7 @@ class GPT(nn.Module):
             return logits
 
     def _ebt_optimization(
-        self, input_embeddings, cos_sin, n_steps, opt_step_size, create_graph=True
+        self, input_embeddings, cos_sin, n_steps, opt_step_size, create_graph=True, targets=None, original_seq_len=None
     ):
         B, S, D = input_embeddings.shape
         V = self.config.vocab_size
@@ -495,9 +505,13 @@ class GPT(nn.Module):
         # Randomized number of steps (2-3 per paper)
         n_steps = random.randint(2, 3)
 
+        # Track losses at each MCMC step if we have targets
+        step_losses = [] if targets is not None else None
+        softcap = 15
+
         with torch.set_grad_enabled(True):
             predicted_logits = predicted_logits.requires_grad_(True)
-            for _ in range(n_steps):
+            for step_idx in range(n_steps):
                 # Add Langevin noise per paper (Eq. 2)
                 if self.config.langevin_noise > 0:
                     predicted_logits = (
@@ -521,6 +535,29 @@ class GPT(nn.Module):
 
                 # Get energy from the output half
                 energy = self.transformer.ebt(all_embeddings, cos_sin)[:, S:, :].sum()
+                
+                # Compute loss at this step if we have targets
+                if targets is not None:
+                    # Trim padding if needed to match targets
+                    embeddings_for_loss = predicted_embeddings
+                    if original_seq_len is not None and original_seq_len < S:
+                        embeddings_for_loss = embeddings_for_loss[:, :original_seq_len, :]
+                    
+                    # Compute logits from embeddings
+                    logits = self.lm_head(embeddings_for_loss)
+                    logits = softcap * torch.tanh(logits / softcap)  # logits softcap
+                    logits = logits.float()  # use tf32/fp32 for logits
+                    
+                    # Compute cross-entropy loss
+                    step_loss = F.cross_entropy(
+                        logits.view(-1, logits.size(-1)),
+                        targets.view(-1),
+                        ignore_index=-1,
+                        reduction="mean",
+                    )
+                    step_losses.append(step_loss)
+                
+                # Compute gradient w.r.t. predicted_logits
                 grad = torch.autograd.grad(
                     energy, predicted_logits, create_graph=create_graph
                 )[0]
@@ -530,7 +567,14 @@ class GPT(nn.Module):
 
         # Return the final predicted embeddings (for lm_head downstream)
         final_probs = F.softmax(predicted_logits, dim=-1)
-        return self.vocab_to_embed(final_probs)  # (B, S, D)
+        final_embeddings = self.vocab_to_embed(final_probs)  # (B, S, D)
+        
+        if targets is not None:
+            # Average losses across all MCMC steps
+            avg_loss = sum(step_losses) / len(step_losses)
+            return final_embeddings, avg_loss
+        else:
+            return final_embeddings
 
     @torch.inference_mode()
     def generate(self, tokens, max_tokens, temperature=1.0, top_k=None, seed=42):
