@@ -53,7 +53,7 @@ depth = (
 )
 use_flash_attn = True
 n_steps = 2
-opt_step_size = 0.8
+opt_step_size = 5  # EBT step size - paper recommends 5 for text
 max_seq_len = 2048  # max context length
 # Training horizon. Only one of these 3 will be used, in this order of precedence.
 num_iterations = -1  # explicit number of steps of the optimization (-1 = disable)
