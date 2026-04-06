@@ -19,6 +19,7 @@ from dataclasses import dataclass
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.func import grad as func_grad
 
 from nanochat.common import get_dist_info
 from nanochat.muon import Muon, DistMuon
@@ -85,7 +86,9 @@ class CausalSelfAttention(nn.Module):
         # Apply Rotary Embeddings to queries and keys to get relative positional encoding
         cos, sin = cos_sin
 
-        # Applying ROPE indepently for input and output
+        # Applying ROPE independently for input and output halves
+        # cos/sin are length S (the original sequence length before EBT doubling),
+        # so they can be applied directly to each half without slicing.
         q_in, q_out = q[:, :S, :, :], q[:, S:, :, :]
         k_in, k_out = k[:, :S, :, :], k[:, S:, :, :]
         q_in, k_in = (
@@ -266,9 +269,9 @@ class GPT(nn.Module):
         head_dim = self.config.n_embd // self.config.n_head
         cos, sin = self._precompute_rotary_embeddings(self.rotary_seq_len, head_dim)
         self.cos, self.sin = cos, sin
-        # Cast the embeddings from fp32 to bf16: optim can tolerate it and it saves memory: both in the model and the activations
+        # Cast the model from fp32 to bf16: optim can tolerate it and it saves memory: both in the model and the activations
         if self.transformer.wte.weight.device.type == "cuda":
-            self.transformer.wte.to(dtype=torch.bfloat16)
+            self.to(dtype=torch.bfloat16)
 
     def _init_weights(self, module):
         if isinstance(module, nn.Linear):
@@ -449,7 +452,7 @@ class GPT(nn.Module):
                 torch.cat([cos_sin[0], cos_pad], dim=1),
                 torch.cat([cos_sin[1], sin_pad], dim=1),
             )
-        
+
         # Run EBT optimization - returns embeddings and optionally losses
         if targets is not None:
             # Training mode: compute losses at each MCMC step
@@ -458,7 +461,6 @@ class GPT(nn.Module):
                 cos_sin,
                 self.config.n_steps,
                 self.config.opt_step_size,
-                create_graph=torch.is_grad_enabled(),
                 targets=targets,
                 original_seq_len=T,
             )
@@ -469,12 +471,11 @@ class GPT(nn.Module):
                 cos_sin,
                 self.config.n_steps,
                 self.config.opt_step_size,
-                create_graph=False,
                 targets=None,
                 original_seq_len=T,
             )
             step_losses = None
-        
+
         # Trim padding if it was added
         if T % BLOCK_MIN != 0:
             x = x[:, :T, :]
@@ -492,7 +493,13 @@ class GPT(nn.Module):
             return logits
 
     def _ebt_optimization(
-        self, input_embeddings, cos_sin, n_steps, opt_step_size, create_graph=True, targets=None, original_seq_len=None
+        self,
+        input_embeddings,
+        cos_sin,
+        n_steps,
+        opt_step_size,
+        targets=None,
+        original_seq_len=None,
     ):
         B, S, D = input_embeddings.shape
         V = self.config.vocab_size
@@ -509,66 +516,59 @@ class GPT(nn.Module):
         step_losses = [] if targets is not None else None
         softcap = 15
 
-        with torch.set_grad_enabled(True):
-            predicted_logits = predicted_logits.requires_grad_(True)
-            for step_idx in range(n_steps):
-                # Add Langevin noise per paper (Eq. 2)
-                if self.config.langevin_noise > 0:
-                    predicted_logits = (
-                        predicted_logits
-                        + self.config.langevin_noise
-                        * torch.randn_like(predicted_logits)
-                    )
+        # Define energy as a pure function of predicted_logits for torch.func.grad.
+        # This avoids autograd.grad(create_graph=True), enabling torch.compile compatibility.
+        def energy_fn(pred_logits):
+            probs = F.softmax(pred_logits, dim=-1)
+            pred_emb = self.vocab_to_embed(probs)
+            all_emb = torch.cat([input_embeddings, pred_emb], dim=1)
+            return self.transformer.ebt(all_emb, cos_sin)[:, S:, :].sum()
 
-                # Random step size multiplier (1-2x) per paper
-                step_multiplier = random.uniform(1.0, 2.0)
-                effective_step_size = opt_step_size * step_multiplier
+        grad_fn = func_grad(energy_fn)
 
-                # Softmax + vocab_to_embed → predicted embeddings
+        for step_idx in range(n_steps):
+            # Add Langevin noise per paper (Eq. 2)
+            if self.config.langevin_noise > 0:
+                predicted_logits = (
+                    predicted_logits
+                    + self.config.langevin_noise * torch.randn_like(predicted_logits)
+                )
+
+            # Random step size multiplier (1-2x) per paper
+            step_multiplier = random.uniform(1.0, 2.0)
+            effective_step_size = opt_step_size * step_multiplier
+
+            # Compute loss at this step if we have targets
+            if targets is not None:
                 predicted_probs = F.softmax(predicted_logits, dim=-1)
-                predicted_embeddings = self.vocab_to_embed(predicted_probs)  # (B, S, D)
+                embeddings_for_loss = self.vocab_to_embed(predicted_probs)
+                if original_seq_len is not None and original_seq_len < S:
+                    embeddings_for_loss = embeddings_for_loss[:, :original_seq_len, :]
 
-                # Concatenate: real input + predicted
-                all_embeddings = torch.cat(
-                    [input_embeddings, predicted_embeddings], dim=1
-                )  # (B, 2S, D)
+                # Compute logits from embeddings
+                logits = self.lm_head(embeddings_for_loss)
+                logits = softcap * torch.tanh(logits / softcap)  # logits softcap
+                logits = logits.float()  # use tf32/fp32 for logits
 
-                # Get energy from the output half
-                energy = self.transformer.ebt(all_embeddings, cos_sin)[:, S:, :].sum()
-                
-                # Compute loss at this step if we have targets
-                if targets is not None:
-                    # Trim padding if needed to match targets
-                    embeddings_for_loss = predicted_embeddings
-                    if original_seq_len is not None and original_seq_len < S:
-                        embeddings_for_loss = embeddings_for_loss[:, :original_seq_len, :]
-                    
-                    # Compute logits from embeddings
-                    logits = self.lm_head(embeddings_for_loss)
-                    logits = softcap * torch.tanh(logits / softcap)  # logits softcap
-                    logits = logits.float()  # use tf32/fp32 for logits
-                    
-                    # Compute cross-entropy loss
-                    step_loss = F.cross_entropy(
-                        logits.view(-1, logits.size(-1)),
-                        targets.view(-1),
-                        ignore_index=-1,
-                        reduction="mean",
-                    )
-                    step_losses.append(step_loss)
-                
-                # Compute gradient w.r.t. predicted_logits
-                grad = torch.autograd.grad(
-                    energy, predicted_logits, create_graph=create_graph
-                )[0]
+                # Compute cross-entropy loss
+                step_loss = F.cross_entropy(
+                    logits.view(-1, logits.size(-1)),
+                    targets.view(-1),
+                    ignore_index=-1,
+                    reduction="mean",
+                )
+                step_losses.append(step_loss)
 
-                # Update logits
-                predicted_logits = predicted_logits - effective_step_size * grad
+            # Compute gradient w.r.t. predicted_logits using torch.func.grad
+            grad = grad_fn(predicted_logits)
+
+            # Update logits
+            predicted_logits = predicted_logits - effective_step_size * grad
 
         # Return the final predicted embeddings (for lm_head downstream)
         final_probs = F.softmax(predicted_logits, dim=-1)
         final_embeddings = self.vocab_to_embed(final_probs)  # (B, S, D)
-        
+
         if targets is not None:
             # Average losses across all MCMC steps
             avg_loss = sum(step_losses) / len(step_losses)

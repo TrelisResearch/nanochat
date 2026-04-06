@@ -193,10 +193,21 @@ if resuming:
     del model_data  # free up this memory after the copy
 
 orig_model = model  # original, uncompiled model, for saving raw model state_dict and for inference/evaluation (because the shapes may change shape)
-if model_config.n_steps <= 1:
+# Compile the model for training. torch.func.grad in _ebt_optimization allows this to work
+# with the inner MCMC optimization loop (unlike autograd.grad with create_graph=True).
+# NOTE: Flash attention training is currently broken due to jvp_flash_attention kernel
+# incompatibility with torch.func.grad (used in _ebt_optimization). Training will fail
+# if use_flash_attn=True. Use non-flash attention for training.
+if use_flash_attn:
+    raise RuntimeError(
+        "Flash attention training is not supported. The jvp_flash_attention kernel "
+        "is incompatible with torch.func.grad which is required for EBT training. "
+        "Please set use_flash_attn=False for training."
+    )
+else:
     model = torch.compile(
         model, dynamic=False
-    )  # the inputs to model will never change shape so dynamic=False is safe
+    )  # dynamic=False since input shapes are fixed
 num_params = sum(p.numel() for p in model.parameters())
 print0(f"Number of parameters: {num_params:,}")
 num_flops_per_token = model.estimate_flops()
