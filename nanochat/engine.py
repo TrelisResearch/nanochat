@@ -191,9 +191,20 @@ class Engine:
         self.tokenizer = tokenizer # needed for tool use
 
     @torch.inference_mode()
-    def generate(self, tokens, num_samples=1, max_tokens=None, temperature=1.0, top_k=None, seed=42, num_recur=None):
-        """Same as generate, but does single prefill and then clones the KV cache."""
+    def generate(self, tokens, num_samples=1, max_tokens=None, temperature=1.0, top_k=None, seed=42,
+                 num_recur=None, num_recur_prefill=None, num_recur_decode=None, prefill_kv_keep="last"):
+        """Same as generate, but does single prefill and then clones the KV cache.
+
+        num_recur_prefill / num_recur_decode override num_recur for the prefill / decode phases
+        independently (either falls back to num_recur if None, which in turn defaults to the
+        model's fixed_k). prefill_kv_keep ∈ {"last","first"} controls which recurrence's K/V is
+        left in the cache for recur layers after prefill.
+        """
         assert isinstance(tokens, list) and isinstance(tokens[0], int), "expecting list of ints"
+        if num_recur_prefill is None:
+            num_recur_prefill = num_recur
+        if num_recur_decode is None:
+            num_recur_decode = num_recur
         device = self.model.get_device()
         rng = torch.Generator(device=device)
         rng.manual_seed(seed)
@@ -218,7 +229,10 @@ class Engine:
             **kv_model_kwargs,
         )
         ids = torch.tensor([tokens], dtype=torch.long, device=device)
-        logits, warm_start_state = self.model.forward(ids, kv_cache=kv_cache_prefill, num_recur=num_recur)
+        logits, warm_start_state = self.model.forward(
+            ids, kv_cache=kv_cache_prefill,
+            num_recur=num_recur_prefill, prefill_kv_keep=prefill_kv_keep,
+        )
         logits = logits[:, -1, :]
         next_ids = sample_next_token(logits, rng, temperature, top_k)  # (B, 1)
         sampled_tokens = next_ids[:, 0].tolist()
@@ -261,7 +275,7 @@ class Engine:
                 first_iteration = False
             else:
                 # Forward the model and get the next token for each row
-                logits, warm_start_state = self.model.forward(ids, kv_cache=kv_cache_decode, num_recur=num_recur, warm_start_state=warm_start_state)  # (B, T, vocab_size)
+                logits, warm_start_state = self.model.forward(ids, kv_cache=kv_cache_decode, num_recur=num_recur_decode, warm_start_state=warm_start_state)  # (B, T, vocab_size)
                 logits = logits[:, -1, :]  # (B, vocab_size) at last time step
                 next_ids = sample_next_token(logits, rng, temperature, top_k)  # (B, 1)
                 sampled_tokens = next_ids[:, 0].tolist()

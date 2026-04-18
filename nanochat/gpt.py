@@ -329,7 +329,8 @@ class GPT(nn.Module):
                 group["initial_lr"] = group["lr"]
         return optimizers
 
-    def forward(self, idx, targets=None, kv_cache=None, loss_reduction='mean', num_recur=None, warm_start_state=None):
+    def forward(self, idx, targets=None, kv_cache=None, loss_reduction='mean', num_recur=None,
+                warm_start_state=None, prefill_kv_keep="last"):
         """
         Forward pass with gated recursive transformer structure.
 
@@ -340,6 +341,10 @@ class GPT(nn.Module):
             loss_reduction: Loss reduction mode ('mean' or 'none')
             num_recur: Number of recurrences (defaults to fixed_k)
             warm_start_state: Optional warm-start state from previous forward pass (B, T, n_embd)
+            prefill_kv_keep: "last" (default) keeps recur-layer K/V from the final recurrence
+                in the kv_cache; "first" snapshots K/V (and the recur state `s`) after the first
+                recurrence and restores them at the end. Only matters when kv_cache is not None
+                and num_recur > 1 (i.e. during prefill with multiple recurrences).
 
         Returns:
             If targets is not None: (loss, gate_mean) where gate_mean in [0,1] = avg gate openness across B×T×K
@@ -385,6 +390,15 @@ class GPT(nn.Module):
         # Structured to avoid if/else branching around tensor ops (torch.compile safe).
         gate_cost = torch.tensor(0.0, device=idx.device)
         B, T = idx.shape
+        # KV snapshot bookkeeping for prefill_kv_keep="first".
+        # Only active when we have a cache, multiple recurrences, and caller requests first.
+        want_first_snapshot = (
+            kv_cache is not None and num_recur > 1 and prefill_kv_keep == "first"
+        )
+        kv_first_snapshot = None
+        s_first_snapshot = None
+        recur_start = self.config.n_prelude
+        recur_end = self.config.n_prelude + self.config.n_recur_block
         for i in range(num_recur):
             # Run recur blocks: u = recur(inject(concat(e, s)))
             u = self.inject(torch.cat([e, s], dim=-1))
@@ -397,12 +411,25 @@ class GPT(nn.Module):
             g_eff = gate_scale * g + (1.0 - gate_scale)  # i=0 → g_eff=1; i>0 → g_eff=g
             s = s + g_eff * (u - s)
             gate_cost = gate_cost + gate_scale * g.sum()  # always a tensor op, 0 at step 0
+            # Snapshot recur-layer K/V after iter 0 so we can restore them post-loop when
+            # prefill_kv_keep="first" — lets downstream decode attend to iter-0 K/V only.
+            if want_first_snapshot and i == 0 and kv_first_snapshot is None:
+                t0 = kv_cache.get_pos()
+                t1 = t0 + T
+                kv_first_snapshot = kv_cache.kv_cache[recur_start:recur_end, :, :, :, t0:t1, :].clone()
+                s_first_snapshot = s
             # Inference early exit (training: kv_cache is None, never fires)
             if kv_cache is not None and g.max().item() < self.config.gate_threshold:
                 break
             # Truncated BPTT: detach gradients for early recurrences
             if self.config.bptt_k is not None and i < num_recur - self.config.bptt_k:
                 s = s.detach()
+        # Restore iter-0 K/V (and s for warm-start) if requested.
+        if kv_first_snapshot is not None:
+            t0 = kv_cache.get_pos()
+            t1 = t0 + T
+            kv_cache.kv_cache[recur_start:recur_end, :, :, :, t0:t1, :] = kv_first_snapshot
+            s = s_first_snapshot
         # Normalise over gated steps only (steps 1..num_recur-1)
         gated_steps = num_recur - 1
         gate_cost = gate_cost / (B * T * max(1, gated_steps))

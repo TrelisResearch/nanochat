@@ -7,3 +7,5 @@ report.md
 eval_bundle/
 .env
 tmp/
+bench_results/
+.claude/
