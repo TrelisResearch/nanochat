@@ -1,78 +1,106 @@
 # GSM8K — Prefill / Decode Recurrence Benchmark
 
 Branch: `prefill-recur-bench`
-Model: `Trelis/nanochat-recursive` — `sft/d20`, step 700 (328.3M params, P=2, R=4, C=2, fixed_k=4)
+Base model: `Trelis/nanochat-recursive` — `sft/d20`, step 700 (328.3M params, P=2, R=4, C=2, fixed_k=4)
 Hardware: single H100 (Modal `dev-ronan`)
-Dataset: GSM8K (`main/test`), 256 problems per config (fixed seed shuffle)
+Dataset: GSM8K (`main/test`), 128–256 problems per config (fixed seed shuffle)
 Decoding: greedy (T=0.0), max_new_tokens=512, calculator tool enabled
-Date: 2026-04-19
+Dates: 2026-04-19
 
 ## TL;DR
 
-1. **Decode-time recurrence is what drives GSM8K accuracy.** r=1 → 0.39%, r=2 → 3.91%, r=4 → 7.42%. This matches the published `Trelis/nanochat-recursive` model-card numbers (r=2: 3.56%, r=4: 6.14%) within sampling noise on 256 vs 1319 problems.
-2. **Running more recurrences only during prefill (decode=1) does not help and can hurt.** All four split configs (prefill∈{2,4} × keep∈{first,last}) land at or below the r=1 baseline of 0.39%. In particular, `prefill=4, keep=last` drops to 0.00% — the iter-4 K/V cache is *actively misleading* for iter-1 decode queries.
-3. **The wall-clock savings from cheap decode are modest** because decode time already dominates only moderately for this model size / completion length. Fastest accurate config remains full r=2 (220 s / 256 problems, 3.91%). Full r=4 costs 360 s for 7.42%.
+1. **Decode-time recurrence drives GSM8K accuracy.** On the untouched `Trelis/nanochat-recursive` SFT checkpoint: r=1 → 0.39%, r=2 → 3.91%, r=4 → 7.42% (matches the model-card numbers within noise).
+2. **Prefill-only-deep, decode-shallow doesn't transfer.** All split configs (prefill∈{2,4}, decode=1, keep∈{first,last}) land at or below the r=1 baseline on the base model. Notably `split_p4_d1_last` = 0.00%. The result is robust: it is **not** an artefact of the inference engine's `warm_start_state` (benching with `--no-warm-start` gives the same 0.00%).
+3. **SFT training on the split regime does not fix this.** Three training experiments (row-by-row, batched depth_mask, and 50/50 mixed) all produced checkpoints with `split_p4_d1_last` ≤ 0.78% — indistinguishable from the baseline at this sample size. Meanwhile, the splits **catastrophically forgot** the original full-depth capability: r=2 and r=4 accuracy both collapsed to 0.00% on every trained checkpoint.
+4. **The model found a "cheat" minimum.** On all trained checkpoints, r=1 and every `keep=first` config converged to identical accuracy (2.34% on d20_depth/no-warm-start). The model is **not** using the deep prefix K/V — it adapted to decode-at-depth-1-everywhere, ignoring prefill depth.
 
-## Results
+Net: without pretraining-time support for variable depth, you can't retrofit "think deep in prefill, sprint in decode" on this recursive architecture via SFT alone.
 
-| Config                   | Accuracy | N pass | Wall-clock (s) | s / problem |
-|--------------------------|---------:|-------:|---------------:|------------:|
-| **full_r1**              |    0.39% |  1/256 |          258.6 |        1.01 |
-| **full_r2**              |    3.91% | 10/256 |          220.3 |        0.86 |
-| **full_r4**              |    7.42% | 19/256 |          360.2 |        1.41 |
-| split_p2_d1_**last**     |    0.78% |  2/256 |          318.2 |        1.24 |
-| split_p2_d1_**first**    |    0.39% |  1/256 |          253.9 |        0.99 |
-| split_p4_d1_**last**     |    0.00% |  0/256 |          339.0 |        1.32 |
-| split_p4_d1_**first**    |    0.39% |  1/256 |          256.2 |        1.00 |
+## Full results matrix
 
-(*`split_pK_d1_keep` = prefill uses K recurrences, decode uses 1, recur-layer K/V left in cache from {first, last} prefill iteration.*)
+256 problems unless noted. 128-problem columns rerun with `--no-warm-start` for direct comparison.
 
-### Sanity vs. model card (full-recur configs)
+| Config                | d20 (orig, warm) | d20 (orig, no-warm) | d20_split_v2 (row, 300 iter) | d20_depth (batched, 1000 iter) | d20_mixed (50/50, 1000 iter) |
+|-----------------------|:---------------:|:-------------------:|:----------------------------:|:------------------------------:|:----------------------------:|
+| full_r1               |      0.39%      |         –           |             –                |          **2.34%** ¹           |        **2.34%** ¹           |
+| full_r2               |      **3.91%**  |         –           |             –                |            0.00% ⚠             |          0.00% ⚠             |
+| full_r4               |      **7.42%**  |         –           |             –                |            0.00% ⚠             |          0.00% ⚠             |
+| split_p2_d1_last      |      0.78%      |         –           |             –                |            0.00%               |          0.00%               |
+| split_p2_d1_first     |      0.39%      |         –           |             –                |            2.34% ¹             |          2.34% ¹             |
+| split_p4_d1_last      |      0.00%      |       0.00%         |           0.78% (2/256)      |            0.00%               |          0.00%               |
+| split_p4_d1_first     |      0.39%      |       0.78%         |           0.39% (1/256)      |            2.34% ¹             |          2.34% ¹             |
 
-| r | This run (N=256) | Card (N=1319) |
-|---|-----------------:|--------------:|
-| 2 |             3.91% |          3.56% |
-| 4 |             7.42% |          6.14% |
+¹ — measured at N=128 with `--no-warm-start`. The original bench was at N=256 with warm_start; on the trained checkpoints both dropped to 0.78% with warm_start (engine mismatch), climbing to 2.34% when inference matched the training regime.
+⚠ — catastrophic forgetting. Generation often runs to the max_tokens cap.
 
-Within expected noise for 256-problem subsample — validates the eval plumbing.
+## What we did
 
-## Interpretation
+The high-level pipeline: bench the base model's split-recurrence behavior → verify via `--no-warm-start` that the engine isn't hiding the signal → SFT-train against the split regime → re-bench.
 
-### Why split collapses to r=1
+### Training experiment A: row-by-row two-stage (d20_split_v2)
+- For each batch row, run a stage-1 prefill forward over prompt tokens at `num_recur=4` with `prefill_kv_keep=last`, then a stage-2 decode forward over response tokens at `num_recur=1`. Loss on response tokens only.
+- 300 iterations × 16 rows per step = 4.8k examples at `init_lr_frac=0.02`.
+- Val loss: 1.2659 → 1.2653 (essentially flat). `split_p4_d1_last` moved from 0.00% → 0.78% (2/256) — one-problem noise-level bump.
 
-Each recur iteration produces different K/V for the recur layers (because the block input `u` changes as the recurrent state `s` evolves). The model was trained with a **fixed** recurrence count (`fixed_k=4`, or a Poisson sampled mean of 4 in pretraining). Its decoder queries at iteration-1 have learned to attend to K/V that correspond to **their own iteration depth**. When you drop decode to 1 recurrence but leave higher-iter K/V in cache:
+### Training experiment B: batched single-forward via `depth_mask` (d20_depth)
+- Added a `depth_mask` kwarg to `GPT.forward` expressing per-position recurrence depth. Tests (`test_depth_mask.py`) verify mathematical equivalence to the two-stage KVCache path.
+- 1000 iterations × 32 rows per step = 32k examples at `init_lr_frac=0.02`. 10 min on H100.
+- Val loss: split=1.3026 → 1.2975, full=1.1234 → 1.3066 (full regime broke by step 100).
+- GSM8K: `split_p4_d1_last` still 0.00%. Full r=2/r=4 destroyed.
 
-- **keep=first** ≈ pure r=1 (0.39%). The cache is overwritten with iter-0 K/V, so decode sees what it would have seen if prefill had only done 1 recurrence. Consistent → matches r=1.
-- **keep=last** is a cross-iteration mismatch: iter-1 queries attending to iter-P K/V. Sometimes marginally better (p=2, 0.78%), sometimes actively worse (p=4, 0.00%). No signal that the "extra processing" in prefill's deeper iterations benefits single-iter decode.
+### Training experiment C: 50/50 mixed regime (d20_mixed)
+- Same as B, but each row randomly picks "split" or "uniform-depth" schedule with probability 0.5. Hope: uniform batches preserve full-depth capability while split batches teach the split regime.
+- 1000 iterations × 32 rows per step, same hyperparameters.
+- Val loss: split=1.3026 → 1.2978, full=1.1234 → 1.3028 (full regime still broke, just as fast).
+- GSM8K: identical failure mode to experiment B.
 
-### Why wall-clock savings are small
+### Diagnostic: did we find a cheat minimum?
+On both trained checkpoints, `full_r1`, `split_p2_d1_first`, and `split_p4_d1_first` all converged to exactly 2.34% (3/128). Since these three configs differ in how much prefill compute is spent but **share the property that decode only sees near-iter-0 prefix K/V**, their identical accuracy is evidence that the model learned to ignore the deep-prefill K/V entirely and lean on its own iter-1 decode.
 
-Rough cost per problem ≈ prefill_cost(P) + decode_cost(D) × n_tokens.
-Prefill is a single pass over ~100-200 prompt tokens; decode runs ~50-150 steps for correct answers, more for wrong/rambly answers. So decode dominates, and total time tracks decode recurrence count much more than prefill recurrence count.
+Compare to `split_p2_d1_last` / `split_p4_d1_last`, which force decode to attend to iter-3 prefix K/V — both remained at 0.00%. The model *cannot* make use of that K/V after SFT.
 
-Observed: full_r2 was actually the **fastest** config at 220 s (faster than full_r1's 259 s!) because r=2 generates correct answers sooner and stops at `<|assistant_end|>` — r=1 keeps rambling to the max_tokens cap on most problems.
+## Why the SFT attempts fail — a hypothesis
 
-### One-line summary
-This recursive model uses decode-time iteration as its load-bearing compute; pushing that compute to prefill-only doesn't transfer. A "cheap decode via prefill offload" regime would require training the model to tolerate mismatched prefill/decode depths (e.g. depth-agnostic training, or explicit depth dropout) — something the current checkpoint was never exposed to.
+The base checkpoint was trained (base + mid + SFT) with Poisson-sampled but **uniform-depth-per-sequence** recurrence. At no point during pretraining did any iter-1 query ever attend to iter-k≥2 K/V. The attention-space mapping from "iter-k K/V" to "useful information" was learned *per iter k*, with the implicit assumption that queries at iter k see K/V at iter k.
+
+When SFT tries to couple iter-1 queries with iter-3 K/V, the model has two roads to reduce loss:
+- **Hard road (the one we want):** learn a cross-iteration K/V geometry — make iter-3 K/V readable by iter-1 queries. Requires shifting many weights.
+- **Easy road (the one we got):** make iter-1 decode work well *on its own* regardless of the K/V in cache. The decoder's lm_head and coda layers can be nudged to produce reasonable next tokens from just the current token's iter-1 state, ignoring prefill depth.
+
+The easy road costs fewer bits of capacity to find and is what SFT gradient descent converges to. Evidence: trained r=1 ≈ all keep=first configs ≈ all keep=last configs on the *decode* side (they all land at 2.34%); the K/V depth simply doesn't matter to the trained model.
+
+Catastrophic forgetting (r=2, r=4 going to 0%) is the corollary: the coda/lm_head's new iter-1-centric mapping is incompatible with the iter-k-centric one the base model had.
 
 ## Implementation notes
 
-Code changes (see `prefill-recur-bench` branch):
+Code on branch `prefill-recur-bench`:
 
-- `nanochat/gpt.py` — `forward` gets a `prefill_kv_keep="last"|"first"` kwarg. With `"first"` and `num_recur>1` and a cache present, the recur-layer K/V slice and `s` are snapshotted after iteration 0 and restored after the loop. No behavioural change when `kv_cache is None` or `num_recur==1`. Note that `gate_min=0.0` for this checkpoint (non-gated recursive), so the gating path is effectively disabled.
-- `nanochat/engine.py` — `Engine.generate` gains `num_recur_prefill`, `num_recur_decode`, and `prefill_kv_keep`; the prefill forward and the decode forward now take independent recurrence counts. Backwards compatible via the existing `num_recur` kwarg.
-- `scripts/bench_gsm8k.py` — single-GPU benchmark script. Sweeps the full × split matrix and records accuracy and wall-clock per config.
-- `modal_bench_gsm8k.py` — Modal runner targeting `dev-ronan`, single H100, pulls Trelis/nanochat-recursive on first run and caches the model on a named Volume.
-- `tests/test_prefill_kv_keep.py` — three unit tests verifying the K/V snapshot/restore invariants. All pass on CPU in <2 s.
-
-## Files
-
-- Raw JSON: `bench_results/bench_gsm8k_20260419_011901.json`
-- Full log: `bench_results/matrix_256.log`
-- Modal run URL: https://modal.com/apps/trelisresearch/dev-ronan/ap-M321NC1UeFkM5EoIQjtjj4
+- `nanochat/gpt.py` — `forward` now supports:
+  - `prefill_kv_keep ∈ {last, first}` — which recurrence's K/V to persist in the cache (inference/bench).
+  - `depth_mask: (B, T) long` — per-position recurrence depth for a single-forward batched training path.
+  - Selective cache writes during the recurrence loop so autograd doesn't trip over in-place K/V overwrites when training through a KVCache.
+- `nanochat/engine.py` — `Engine.generate` accepts `num_recur_prefill`, `num_recur_decode`, `prefill_kv_keep`, `use_warm_start`. `KVCache.insert_kv` clones returned K/V views when `torch.is_grad_enabled()` so backward can't be invalidated by later in-place writes.
+- `scripts/bench_gsm8k.py` — single-GPU bench driver with the matrix in this report. `--no-warm-start` for training-regime-matched inference.
+- `scripts/chat_sft_split.py` — row-by-row two-stage SFT (experiment A).
+- `scripts/chat_sft_depth.py` — batched single-forward SFT with `depth_mask` (experiments B and C). `--split-prob` controls mixed regime.
+- `modal_bench_gsm8k.py`, `modal_train_split_sft.py`, `modal_train_depth_sft.py` — Modal runners (dev-ronan env, H100).
+- Tests: `test_prefill_kv_keep.py`, `test_split_train_grad.py`, `test_depth_mask.py` (35 tests pass on CPU).
 
 ## Suggested next steps
 
-1. **Train a depth-tolerant variant.** Randomly mask recur steps during SFT (e.g. randomly drop to k∈{1,2,4} per batch) to teach the model to produce K/V that behaves under mismatched decode depth. Then retry the split matrix — if it closes the gap, the "prefill-only deep think" idea becomes viable.
-2. **Measure prefill-only vs decode-only cost directly.** Current timing lumps both together. A micro-benchmark on the two forward calls (T=200 prefill vs 100 × T=1 decode calls) would isolate where the budget actually goes and tell us the ceiling for split-mode speedup.
-3. **Expand the full-recur sweep with r=8, r=16.** The card shows r=8 ≈ r=4 and r=16 barely moves — would be interesting to reproduce on a newer checkpoint, but not critical for the split question.
+Things worth trying if someone wants to push this further:
+
+1. **Pretrain with variable-depth from scratch.** Either per-sequence or per-position depth randomization during pretraining. This is the "cheapest" path to making the split regime actually work — it teaches cross-iteration K/V compatibility at the stage the model is most plastic.
+2. **Freeze the lm_head / coda during SFT.** Force the adaptation to land on the recur blocks' K/V projections rather than letting the decoder find the easy iter-1-everywhere route. Combined with a mixed regime this might close the "cheat" door.
+3. **Auxiliary contrastive loss.** Penalise the model when the same decode logits come out of keep=first vs keep=last. That directly punishes the cheat pattern.
+4. **Lower LR + longer training.** 4.8k examples in experiment A was probably too few to see signal; 32k in B/C was too much LR-momentum for the full regime. A calibrated middle (e.g. init_lr_frac=0.005 + 3–5k examples at split_prob=0.3) might give a small-but-real gain without catastrophic forgetting. Worth about 1 hour of Modal.
+5. **Call it.** The best evidence we have is that this is a pretraining-era decision. Investing further SFT tuning is likely to produce more "decode-at-iter-1-everywhere" models, not the deep-prefill-shallow-decode speedup we wanted.
+
+## Files
+
+- `bench_results/REPORT.md` — this document
+- `bench_results/bench_gsm8k_*.json` — raw bench JSONs (initial matrix)
+- `bench_results/bench_d20_depth_full.log` — full matrix on depth-trained checkpoint
+- `bench_results/bench_d20_mixed.log` — mixed-regime checkpoint bench
+- `bench_results/full_train_*.log` — training logs for experiments A / B / C
+- Modal run dashboard: https://modal.com/apps/trelisresearch/dev-ronan
