@@ -29,8 +29,11 @@ Net: without pretraining-time support for variable depth, you can't retrofit "th
 | split_p2_d1_first     |      0.39%      |         –           |             –                |            2.34% ¹             |          2.34% ¹             |
 | split_p4_d1_last      |      0.00%      |       0.00%         |           0.78% (2/256)      |            0.00%               |          0.00%               |
 | split_p4_d1_first     |      0.39%      |       0.78%         |           0.39% (1/256)      |            2.34% ¹             |          2.34% ¹             |
+| split_p4_d2_last      |      0.00% ²    |         –           |             –                |             –                  |            –                 |
+| split_p4_d2_first     |      0.00% ²    |         –           |             –                |             –                  |            –                 |
 
 ¹ — measured at N=128 with `--no-warm-start`. The original bench was at N=256 with warm_start; on the trained checkpoints both dropped to 0.78% with warm_start (engine mismatch), climbing to 2.34% when inference matched the training regime.
+² — measured at N=256 on the **untouched baseline** `d20` to test whether a decode depth of 2 (instead of 1) can recover performance under `prefill_kv_keep=last`. It cannot: 0/256 on both keep modes, and generation runs to the max_tokens cap (~800 s vs 360 s for full_r4), indicating responses are incoherent rather than just wrong.
 ⚠ — catastrophic forgetting. Generation often runs to the max_tokens cap.
 
 ## What we did
@@ -58,6 +61,20 @@ The high-level pipeline: bench the base model's split-recurrence behavior → ve
 On both trained checkpoints, `full_r1`, `split_p2_d1_first`, and `split_p4_d1_first` all converged to exactly 2.34% (3/128). Since these three configs differ in how much prefill compute is spent but **share the property that decode only sees near-iter-0 prefix K/V**, their identical accuracy is evidence that the model learned to ignore the deep-prefill K/V entirely and lean on its own iter-1 decode.
 
 Compare to `split_p2_d1_last` / `split_p4_d1_last`, which force decode to attend to iter-3 prefix K/V — both remained at 0.00%. The model *cannot* make use of that K/V after SFT.
+
+## Sharpened finding: cross-depth attention only works when decode *catches up* to prompt depth
+
+A follow-up sanity check: run the untouched baseline at prefill=4, decode=**2** (instead of decode=1). If "decode=1 is simply too shallow for math" were the whole story, decode=2 should recover some accuracy — full_r2 manages 3.91% with decode depth 2. But on the baseline:
+
+- `split_p4_d2_last` → 0.00% (0/256), 807 s
+- `split_p4_d2_first` → 0.00% (0/256), 801 s
+- `full_r2` (same decode depth but prompt K/V also at iter-1) → 3.91%, 220 s
+
+`split_p4_d2` and `full_r2` have **identical coda input** in terms of depth — response's `s_iter_1`. The only difference is the prompt K/V the response attends to during its 2 iters: iter-3 in the split, iter-1 in full_r2. Feeding the response iter-0/iter-1 queries *more-processed* prompt K/V actively hurts — 0% vs 3.91%.
+
+This revises an earlier claim. I said "cross-depth attention works at inference for free" because `full_r4` decode has iter-0 queries attending to iter-3 K/V and performs well. What's actually true: this cross-depth pairing is only harmless when the decode *continues iterating* to match the prompt's depth before coda reads `s`. Iter-0 queries against iter-3 keys are a transient intermediate state on the way to iter-3 queries against iter-3 keys. Stop early and coda reads an `s` that was evolved under a depth mismatch it was never trained to terminate at — and that `s` is unusable for generation (outputs run to the max_tokens cap).
+
+So the specific mechanism "use later-iter K/V of earlier tokens to shortcut decode" *is* what we were hoping would be free, but empirically on this checkpoint it isn't. The baseline cannot decode coherently at any depth < prompt_k/v_depth.
 
 ## Why the SFT attempts fail — a hypothesis
 
@@ -88,13 +105,13 @@ Code on branch `prefill-recur-bench`:
 
 ## Suggested next steps
 
-Things worth trying if someone wants to push this further:
+The sharpened finding (baseline can't decode at depth < prompt depth, at decode=1 *or* decode=2) suggests the SFT-scale interventions would have to teach something the checkpoint is structurally unprepared to do. Things worth trying if someone wants to push this further, roughly ordered by cost-effectiveness:
 
-1. **Pretrain with variable-depth from scratch.** Either per-sequence or per-position depth randomization during pretraining. This is the "cheapest" path to making the split regime actually work — it teaches cross-iteration K/V compatibility at the stage the model is most plastic.
-2. **Freeze the lm_head / coda during SFT.** Force the adaptation to land on the recur blocks' K/V projections rather than letting the decoder find the easy iter-1-everywhere route. Combined with a mixed regime this might close the "cheat" door.
-3. **Auxiliary contrastive loss.** Penalise the model when the same decode logits come out of keep=first vs keep=last. That directly punishes the cheat pattern.
-4. **Lower LR + longer training.** 4.8k examples in experiment A was probably too few to see signal; 32k in B/C was too much LR-momentum for the full regime. A calibrated middle (e.g. init_lr_frac=0.005 + 3–5k examples at split_prob=0.3) might give a small-but-real gain without catastrophic forgetting. Worth about 1 hour of Modal.
-5. **Call it.** The best evidence we have is that this is a pretraining-era decision. Investing further SFT tuning is likely to produce more "decode-at-iter-1-everywhere" models, not the deep-prefill-shallow-decode speedup we wanted.
+1. **Call it.** Best evidence we have is that this is a pretraining-era decision for this checkpoint. Further SFT tuning on this model is likely to keep producing "decoder works at iter-1-everywhere" solutions (which is what we got) rather than "decoder leverages deep prompt K/V at shallow decode" (which it can't be coerced into on this budget).
+2. **Continued pretraining on large data with curriculum (McLeish recipe).** 10–50B tokens on FineWeb-Edu + math, Poisson-Lognormal depth with curriculum from low mean → 16 or 32. This is the established path to depth-robust recurrent models; they explicitly show it works from pretrained initialisations. Expensive but the clean answer.
+3. **Pretrain variable-depth from scratch.** Either per-sequence (as McLeish / Geiping do) or per-position depth randomisation. Gives the model "any depth works at any depth" semantics built in. Most expensive, most powerful.
+4. **Freeze lm_head / coda during split SFT.** Force the adaptation onto the recur-block K/V projections and stop the decoder from finding the iter-1-everywhere shortcut. Combined with mixed regime this might close the cheat door at small scale.
+5. **Auxiliary contrastive loss.** Penalise the model when decode logits are invariant to keep=first vs keep=last. Directly punishes the cheat pattern. Could be bolted onto any of the above.
 
 ## Files
 

@@ -28,7 +28,7 @@ from nanochat.engine import Engine
 from tasks.gsm8k import GSM8K
 
 
-def build_config_matrix(include_full, include_split, full_rs, split_prefill_rs):
+def build_config_matrix(include_full, include_split, full_rs, split_prefill_rs, split_decode_rs):
     configs = []
     if include_full:
         for r in full_rs:
@@ -39,16 +39,17 @@ def build_config_matrix(include_full, include_split, full_rs, split_prefill_rs):
                 "kv_keep": "last",  # irrelevant when prefill==decode
             })
     if include_split:
-        for r in split_prefill_rs:
-            if r <= 1:
-                continue  # split only interesting for prefill > decode
-            for keep in ("last", "first"):
-                configs.append({
-                    "name": f"split_p{r}_d1_{keep}",
-                    "prefill": r,
-                    "decode": 1,
-                    "kv_keep": keep,
-                })
+        for r_p in split_prefill_rs:
+            for r_d in split_decode_rs:
+                if r_p <= r_d:
+                    continue  # split only interesting for prefill > decode
+                for keep in ("last", "first"):
+                    configs.append({
+                        "name": f"split_p{r_p}_d{r_d}_{keep}",
+                        "prefill": r_p,
+                        "decode": r_d,
+                        "kv_keep": keep,
+                    })
     return configs
 
 
@@ -105,7 +106,9 @@ def main():
     ap.add_argument("--full-rs", default="1,2,4",
                     help="Comma-separated recurrence counts for the full (prefill=decode) sweep")
     ap.add_argument("--split-prefill-rs", default="2,4",
-                    help="Comma-separated prefill recurrence counts for the split (decode=1) sweep")
+                    help="Comma-separated prefill recurrence counts for the split sweep")
+    ap.add_argument("--split-decode-rs", default="1",
+                    help="Comma-separated decode recurrence counts for the split sweep")
     ap.add_argument("--no-full", action="store_true", help="Skip full-recur configs")
     ap.add_argument("--no-split", action="store_true", help="Skip split prefill/decode configs")
     ap.add_argument("--no-warm-start", action="store_true",
@@ -133,11 +136,13 @@ def main():
 
     full_rs = [int(x) for x in args.full_rs.split(",") if x.strip()]
     split_prefill_rs = [int(x) for x in args.split_prefill_rs.split(",") if x.strip()]
+    split_decode_rs = [int(x) for x in args.split_decode_rs.split(",") if x.strip()]
     configs = build_config_matrix(
         include_full=not args.no_full,
         include_split=not args.no_split,
         full_rs=full_rs,
         split_prefill_rs=split_prefill_rs,
+        split_decode_rs=split_decode_rs,
     )
     print(f"Running {len(configs)} configs:")
     for c in configs:

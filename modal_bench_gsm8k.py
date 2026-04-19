@@ -120,6 +120,7 @@ def run_bench(
     max_problems: int | None = None,
     full_rs: str = "1,2,4",
     split_prefill_rs: str = "2,4",
+    split_decode_rs: str = "1",
     no_full: bool = False,
     no_split: bool = False,
     max_new_tokens: int = 512,
@@ -154,6 +155,7 @@ def run_bench(
         "-k", str(top_k),
         "--full-rs", full_rs,
         "--split-prefill-rs", split_prefill_rs,
+        "--split-decode-rs", split_decode_rs,
     ]
     if max_problems is not None:
         cmd += ["-x", str(max_problems)]
@@ -189,6 +191,7 @@ def main(
     max_problems: int = 0,
     full_rs: str = "1,2,4",
     split_prefill_rs: str = "2,4",
+    split_decode_rs: str = "1",
     no_full: bool = False,
     no_split: bool = False,
     max_new_tokens: int = 512,
@@ -205,6 +208,7 @@ def main(
         max_problems=mp,
         full_rs=full_rs,
         split_prefill_rs=split_prefill_rs,
+        split_decode_rs=split_decode_rs,
         no_full=no_full,
         no_split=no_split,
         max_new_tokens=max_new_tokens,
