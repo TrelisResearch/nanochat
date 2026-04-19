@@ -330,7 +330,7 @@ class GPT(nn.Module):
         return optimizers
 
     def forward(self, idx, targets=None, kv_cache=None, loss_reduction='mean', num_recur=None,
-                warm_start_state=None, prefill_kv_keep="last"):
+                warm_start_state=None, prefill_kv_keep="last", depth_mask=None):
         """
         Forward pass with gated recursive transformer structure.
 
@@ -339,19 +339,29 @@ class GPT(nn.Module):
             targets: Target token indices for loss computation (B, T) or None for inference
             kv_cache: KV cache for inference (RecursiveKVCache or None)
             loss_reduction: Loss reduction mode ('mean' or 'none')
-            num_recur: Number of recurrences (defaults to fixed_k)
+            num_recur: Number of recurrences (defaults to fixed_k). Ignored if depth_mask is set.
             warm_start_state: Optional warm-start state from previous forward pass (B, T, n_embd)
             prefill_kv_keep: "last" (default) keeps recur-layer K/V from the final recurrence
                 in the kv_cache; "first" snapshots K/V (and the recur state `s`) after the first
                 recurrence and restores them at the end. Only matters when kv_cache is not None
                 and num_recur > 1 (i.e. during prefill with multiple recurrences).
+            depth_mask: Optional (B, T) int tensor specifying per-position recurrence count.
+                Runs max(depth_mask) iterations over the full sequence. Each position is only
+                "active" (updates its s) during its LAST depth_mask[p] iterations — so all
+                positions share the same *final* iteration. That way a depth=1 position sees
+                the final-depth K/V of any depth>1 positions it attends to. Incompatible with
+                kv_cache (training-only path).
 
         Returns:
             If targets is not None: (loss, gate_mean) where gate_mean in [0,1] = avg gate openness across B×T×K
             Else: (logits, final_recur_state) where final_recur_state can be used for warm-start
         """
         B, T = idx.size()
-        if num_recur is None:
+        if depth_mask is not None:
+            assert kv_cache is None, "depth_mask mode is training-only; incompatible with kv_cache"
+            assert depth_mask.shape == (B, T), f"depth_mask must be (B, T)={B, T}, got {tuple(depth_mask.shape)}"
+            num_recur = int(depth_mask.max().item())
+        elif num_recur is None:
             num_recur = self.config.fixed_k
 
         # Grab the rotary embeddings for the current sequence length (they are of shape (1, seq_len, 1, head_dim/2))
@@ -401,6 +411,11 @@ class GPT(nn.Module):
         # same selective-write logic for simplicity, then handle the keep=first restore
         # only when we have a snapshot.
         write_iter = 0 if prefill_kv_keep == "first" else (num_recur - 1)
+        # Pre-compute per-position activation schedule when depth_mask is set:
+        # position p is active at iter i iff i >= (max_depth - depth_mask[p]).
+        # First active iter for position p: i == max_depth - depth_mask[p] → full update (g_eff=1).
+        if depth_mask is not None:
+            start_iter = (num_recur - depth_mask).unsqueeze(-1)  # (B, T, 1) long
         for i in range(num_recur):
             # Run recur blocks: u = recur(inject(concat(e, s)))
             u = self.inject(torch.cat([e, s], dim=-1))
@@ -408,14 +423,22 @@ class GPT(nn.Module):
             for block in self.transformer.recur:
                 u = block(u, cos_sin, iter_cache)
             g = self.config.gate_min + (1 - self.config.gate_min) * torch.sigmoid(self.gate_proj(torch.cat([u, s], dim=-1)))  # [B, T, 1] ∈ [gate_min, 1]
-            # Scalar multipliers resolved at trace time (i is a Python int) — no tensor branches.
-            # step 0: gate_scale=0 (forced full update, not penalised); steps 1+: gate_scale=1
-            gate_scale = 0.0 if i == 0 else 1.0
-            g_eff = gate_scale * g + (1.0 - gate_scale)  # i=0 → g_eff=1; i>0 → g_eff=g
-            s = s + g_eff * (u - s)
-            gate_cost = gate_cost + gate_scale * g.sum()  # always a tensor op, 0 at step 0
-            # Inference early exit (training: kv_cache is None, never fires)
-            if not self.training and kv_cache is not None and g.max().item() < self.config.gate_threshold:
+            if depth_mask is not None:
+                # Per-position gating. active[p] = True if i has reached position p's start iter.
+                active = (i >= start_iter)  # (B, T, 1) bool
+                is_first = (i == start_iter)  # first active iter for this position
+                g_eff = torch.where(is_first, torch.ones_like(g), g)
+                s_new = s + g_eff * (u - s)
+                s = torch.where(active, s_new, s)
+                gate_cost = gate_cost + (g * active.float() * (~is_first).float()).sum()
+            else:
+                # Uniform-depth (original) path. i==0 → full update; i>0 → gated.
+                gate_scale = 0.0 if i == 0 else 1.0
+                g_eff = gate_scale * g + (1.0 - gate_scale)
+                s = s + g_eff * (u - s)
+                gate_cost = gate_cost + gate_scale * g.sum()
+            # Inference early exit (training: kv_cache is None, never fires; depth_mask is training-only)
+            if not self.training and kv_cache is not None and depth_mask is None and g.max().item() < self.config.gate_threshold:
                 break
             # Truncated BPTT: detach gradients for early recurrences
             if self.config.bptt_k is not None and i < num_recur - self.config.bptt_k:

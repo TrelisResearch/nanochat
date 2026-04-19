@@ -128,6 +128,7 @@ def run_bench(
     repo_id: str = "Trelis/nanochat-recursive",
     sft_subpath: str = "sft/d20",
     tokenizer_subpath: str = "tokenizer/latest",
+    model_tag: str | None = None,
 ):
     import subprocess
     import sys
@@ -139,11 +140,14 @@ def run_bench(
     _ensure_model_and_tokenizer(nanochat_base, repo_id, sft_subpath, tokenizer_subpath)
     vol.commit()
 
-    # Build CLI args
+    # Build CLI args. If model_tag not given, fall back to the HF subpath's last segment
+    # (i.e. the upstream checkpoint we pulled). Pass our own tag to bench a locally trained
+    # checkpoint sitting on the same Volume.
+    effective_tag = model_tag or sft_subpath.split("/")[-1]
     cmd = [
         sys.executable, "-m", "scripts.bench_gsm8k",
         "-i", "sft",
-        "-g", sft_subpath.split("/")[-1],
+        "-g", effective_tag,
         "-m", str(max_new_tokens),
         "-t", str(temperature),
         "-k", str(top_k),
@@ -188,9 +192,11 @@ def main(
     temperature: float = 0.0,
     top_k: int = 50,
     out_dir: str = "bench_results",
+    model_tag: str = "",
 ):
     mp = None if max_problems <= 0 else max_problems
-    print(f"[local] launching on Modal (dev-ronan) with max_problems={mp}")
+    tag = model_tag.strip() or None
+    print(f"[local] launching on Modal (dev-ronan) with max_problems={mp} model_tag={tag}")
     result = run_bench.remote(
         max_problems=mp,
         full_rs=full_rs,
@@ -200,6 +206,7 @@ def main(
         max_new_tokens=max_new_tokens,
         temperature=temperature,
         top_k=top_k,
+        model_tag=tag,
     )
     out_dir_p = Path(out_dir)
     out_dir_p.mkdir(parents=True, exist_ok=True)
