@@ -108,18 +108,21 @@ def compute_row_loss(model, inputs_row, targets_row, num_recur_prefill, num_recu
 
     # Stage 1: prefill
     if P > 0:
-        _, warm = model.forward(
+        _ = model.forward(
             prefix_ids, kv_cache=cache,
             num_recur=num_recur_prefill, prefill_kv_keep="last",
         )
-        warm_last = warm[:, -1:, :]
-    else:
-        warm_last = None
 
-    # Stage 2: decode (response)
+    # Stage 2: decode (response). We deliberately DO NOT pass warm_start_state here.
+    # warm_start is an inference-time artifact: each decoded token inherits the previous
+    # token's final `s` as its starting state. During parallel training we cannot
+    # reproduce that chain across all suffix positions simultaneously (they all see the
+    # same prefix-derived warm_start, which differs from inference). Initialising
+    # s = e_suffix (by passing warm_start_state=None) keeps training consistent and
+    # still produces the K/V regime we want the model to adapt to.
     logits, _ = model.forward(
         suffix_ids, kv_cache=cache,
-        num_recur=num_recur_decode, warm_start_state=warm_last,
+        num_recur=num_recur_decode, warm_start_state=None,
     )
     loss = F.cross_entropy(
         logits.view(-1, logits.size(-1)),
@@ -131,12 +134,14 @@ def compute_row_loss(model, inputs_row, targets_row, num_recur_prefill, num_recu
     return loss, n_valid
 
 
-def run_val_loss(model, val_iter_fn, tokenizer, device, eval_steps, num_recur_prefill, num_recur_decode):
+def run_val_loss(model, val_iter_fn, tokenizer, device, eval_steps, num_recur_prefill, num_recur_decode,
+                 autocast_ctx=None):
     model.eval()
     total_loss = 0.0
     total_tokens = 0
     it = val_iter_fn()
-    with torch.no_grad():
+    ctx = autocast_ctx if autocast_ctx is not None else nullcontext()
+    with torch.no_grad(), ctx:
         for _ in range(eval_steps):
             try:
                 inputs_row, targets_row, _ = next(it)
@@ -144,6 +149,10 @@ def run_val_loss(model, val_iter_fn, tokenizer, device, eval_steps, num_recur_pr
                 break
             res = compute_row_loss(model, inputs_row, targets_row, num_recur_prefill, num_recur_decode)
             if res[0] is None:
+                continue
+            if not torch.isfinite(res[0]):
+                # Skip — occasionally one val row produces a non-finite loss under bf16
+                # two-stage forward, and we don't want it to contaminate the average.
                 continue
             total_loss += res[0].item()
             total_tokens += res[1]
@@ -166,8 +175,12 @@ def main():
     ap.add_argument("--unembedding-lr", type=float, default=0.004)
     ap.add_argument("--embedding-lr", type=float, default=0.2)
     ap.add_argument("--matrix-lr", type=float, default=0.02)
-    ap.add_argument("--init-lr-frac", type=float, default=0.02)
+    ap.add_argument("--init-lr-frac", type=float, default=0.005,
+                    help="Starting LR as fraction of base optimizer LR. Lower default than chat_sft.py "
+                         "because the mismatched-depth regime produces unusually large gradients early on.")
     ap.add_argument("--weight-decay", type=float, default=0.0)
+    ap.add_argument("--grad-clip", type=float, default=1.0,
+                    help="Global grad norm clip; pass 0 to disable")
     ap.add_argument("--dtype", default="bfloat16", choices=["bfloat16", "float32"])
     ap.add_argument("--out-tag", default=None,
                     help="Tag for the saved chatsft_checkpoints/<tag> dir; default = current tag + '_split'")
@@ -215,7 +228,8 @@ def main():
         # Eval
         if step % args.eval_every == 0:
             val_loss = run_val_loss(model, make_val_iter, tokenizer, device,
-                                    args.eval_steps, args.num_recur_prefill, args.num_recur_decode)
+                                    args.eval_steps, args.num_recur_prefill, args.num_recur_decode,
+                                    autocast_ctx=autocast_ctx)
             print0(f"step {step:05d} | val_loss (per-token) = {val_loss:.4f}")
 
         # Accumulate grads across target_examples_per_step rows
@@ -245,19 +259,34 @@ def main():
             for g in opt.param_groups:
                 g["lr"] = g["initial_lr"] * lrm
 
-        for opt in optimizers:
-            opt.step()
+        if args.grad_clip > 0:
+            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
+        else:
+            grad_norm = None
+
+        # Check for nan grads — if any, skip this step's opt.step() to avoid corrupting weights.
+        any_nan = any(
+            p.grad is not None and not torch.isfinite(p.grad).all()
+            for p in model.parameters()
+        )
+        if any_nan:
+            print0(f"step {step:05d} | WARNING: non-finite gradient detected; skipping optimizer step")
+        else:
+            for opt in optimizers:
+                opt.step()
         model.zero_grad(set_to_none=True)
 
         if step % 10 == 0 or step == args.num_iterations - 1:
             elapsed = time.perf_counter() - t_start
             ppt = total_loss_val / max(1, total_tokens)
+            gn_str = f" | gnorm={grad_norm.item():.2f}" if grad_norm is not None else ""
             print0(f"step {step:05d}/{args.num_iterations} | train_loss/tok={ppt:.4f} | lrm={lrm:.4f} | "
-                   f"tokens={total_tokens} | {elapsed:.0f}s")
+                   f"tokens={total_tokens}{gn_str} | {elapsed:.0f}s")
 
     # Final eval + save
     val_loss = run_val_loss(model, make_val_iter, tokenizer, device,
-                             args.eval_steps, args.num_recur_prefill, args.num_recur_decode)
+                             args.eval_steps, args.num_recur_prefill, args.num_recur_decode,
+                             autocast_ctx=autocast_ctx)
     print0(f"Final val_loss={val_loss:.4f}")
 
     base_dir = get_base_dir()
