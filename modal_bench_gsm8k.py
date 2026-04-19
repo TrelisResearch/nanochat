@@ -129,6 +129,7 @@ def run_bench(
     sft_subpath: str = "sft/d20",
     tokenizer_subpath: str = "tokenizer/latest",
     model_tag: str | None = None,
+    no_warm_start: bool = False,
 ):
     import subprocess
     import sys
@@ -160,6 +161,8 @@ def run_bench(
         cmd.append("--no-full")
     if no_split:
         cmd.append("--no-split")
+    if no_warm_start:
+        cmd.append("--no-warm-start")
 
     ts = time.strftime("%Y%m%d_%H%M%S")
     out_json = f"{nanochat_base}/bench_gsm8k_{ts}.json"
@@ -193,6 +196,7 @@ def main(
     top_k: int = 50,
     out_dir: str = "bench_results",
     model_tag: str = "",
+    no_warm_start: bool = False,
 ):
     mp = None if max_problems <= 0 else max_problems
     tag = model_tag.strip() or None
@@ -207,6 +211,7 @@ def main(
         temperature=temperature,
         top_k=top_k,
         model_tag=tag,
+        no_warm_start=no_warm_start,
     )
     out_dir_p = Path(out_dir)
     out_dir_p.mkdir(parents=True, exist_ok=True)

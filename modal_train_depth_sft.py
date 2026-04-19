@@ -99,6 +99,7 @@ def run_train(
     eval_every: int = 100,
     eval_batches: int = 8,
     init_lr_frac: float = 0.02,
+    split_prob: float = 1.0,
     out_tag: str = "d20_depth",
     repo_id: str = "Trelis/nanochat-recursive",
     sft_subpath: str = "sft/d20",
@@ -127,6 +128,7 @@ def run_train(
         "--eval-every", str(eval_every),
         "--eval-batches", str(eval_batches),
         "--init-lr-frac", str(init_lr_frac),
+        "--split-prob", str(split_prob),
         "--out-tag", out_tag,
     ]
     print("[train] " + " ".join(cmd))
@@ -153,6 +155,7 @@ def main(
     eval_every: int = 100,
     eval_batches: int = 8,
     init_lr_frac: float = 0.02,
+    split_prob: float = 1.0,
     out_tag: str = "d20_depth",
 ):
     print(f"[local] launching depth-mask SFT on Modal dev-ronan "
@@ -167,6 +170,7 @@ def main(
         eval_every=eval_every,
         eval_batches=eval_batches,
         init_lr_frac=init_lr_frac,
+        split_prob=split_prob,
         out_tag=out_tag,
     )
     print("[local] done:", result)

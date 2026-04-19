@@ -53,7 +53,7 @@ def build_config_matrix(include_full, include_split, full_rs, split_prefill_rs):
 
 
 def run_one_config(task, tokenizer, engine, *, prefill, decode, kv_keep, max_problems,
-                   max_new_tokens, temperature, top_k):
+                   max_new_tokens, temperature, top_k, use_warm_start=True):
     num_problems = min(len(task), max_problems) if max_problems is not None else len(task)
     num_passed = 0
     t_start = time.perf_counter()
@@ -69,6 +69,7 @@ def run_one_config(task, tokenizer, engine, *, prefill, decode, kv_keep, max_pro
             num_recur_prefill=prefill,
             num_recur_decode=decode,
             prefill_kv_keep=kv_keep,
+            use_warm_start=use_warm_start,
         )
         prefix_len = len(prompt_ids)
         completion = tokenizer.decode(results[0][prefix_len:])
@@ -107,6 +108,8 @@ def main():
                     help="Comma-separated prefill recurrence counts for the split (decode=1) sweep")
     ap.add_argument("--no-full", action="store_true", help="Skip full-recur configs")
     ap.add_argument("--no-split", action="store_true", help="Skip split prefill/decode configs")
+    ap.add_argument("--no-warm-start", action="store_true",
+                    help="Disable warm_start_state at decode — matches depth_mask SFT regime")
     ap.add_argument("--out", default=None, help="Output JSON path (default: <base>/bench_gsm8k_<ts>.json)")
     args = ap.parse_args()
 
@@ -151,6 +154,7 @@ def main():
                 max_new_tokens=args.max_new_tokens,
                 temperature=args.temperature,
                 top_k=args.top_k,
+                use_warm_start=not args.no_warm_start,
             )
         r["config"] = c
         results.append(r)

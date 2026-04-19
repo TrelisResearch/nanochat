@@ -200,13 +200,15 @@ class Engine:
 
     @torch.inference_mode()
     def generate(self, tokens, num_samples=1, max_tokens=None, temperature=1.0, top_k=None, seed=42,
-                 num_recur=None, num_recur_prefill=None, num_recur_decode=None, prefill_kv_keep="last"):
+                 num_recur=None, num_recur_prefill=None, num_recur_decode=None, prefill_kv_keep="last",
+                 use_warm_start=True):
         """Same as generate, but does single prefill and then clones the KV cache.
 
         num_recur_prefill / num_recur_decode override num_recur for the prefill / decode phases
         independently (either falls back to num_recur if None, which in turn defaults to the
         model's fixed_k). prefill_kv_keep ∈ {"last","first"} controls which recurrence's K/V is
-        left in the cache for recur layers after prefill.
+        left in the cache for recur layers after prefill. use_warm_start=False disables passing
+        prefill's final `s` as the warm_start for decode — matches how depth_mask SFT trains.
         """
         assert isinstance(tokens, list) and isinstance(tokens[0], int), "expecting list of ints"
         if num_recur_prefill is None:
@@ -255,8 +257,10 @@ class Engine:
         kv_cache_decode.prefill(kv_cache_prefill)
         del kv_cache_prefill # no need to keep this memory around
         # For warm-start, only keep the last position's state (shape B,1,h)
-        # This is used to initialize recurrence for the next token
-        if warm_start_state is not None:
+        # This is used to initialize recurrence for the next token.
+        if not use_warm_start:
+            warm_start_state = None
+        elif warm_start_state is not None:
             warm_start_state = warm_start_state[:, -1:, :]  # (B, T, h) -> (B, 1, h)
             if num_samples > 1:
                 warm_start_state = warm_start_state.expand(num_samples, -1, -1)

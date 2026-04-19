@@ -72,31 +72,44 @@ def row_stream(dataset, tokenizer):
             yield inputs_row, targets_row, n_valid
 
 
-def collate_batch(rows, pad_id, num_recur_prefill, num_recur_decode, max_seq_len):
+def collate_batch(rows, pad_id, num_recur_prefill, num_recur_decode, max_seq_len,
+                   split_prob=1.0, rng=None):
     """Build (inputs, targets, depth_mask) with per-position depth.
-    Prompt positions (targets==-1 and before the first valid target) get
-    num_recur_prefill. Everything else (response + right-padding) gets
-    num_recur_decode. That matches the 2-stage semantics per-row.
+
+    For each row, with probability `split_prob` use the split schedule
+    (prompt=num_recur_prefill, response=num_recur_decode). Otherwise use the
+    "uniform" schedule (every position = num_recur_prefill) — matching the
+    original SFT training regime. Mixed-regime training preserves full-depth
+    capability while also teaching the split regime.
     """
     B = len(rows)
     T_max = min(max(r[0].numel() for r in rows), max_seq_len)
     inputs = torch.full((B, T_max), pad_id, dtype=torch.long)
     targets = torch.full((B, T_max), -1, dtype=torch.long)
+    # Default row depth = decode; we overwrite below based on per-row split/uniform decision.
     depth_mask = torch.full((B, T_max), num_recur_decode, dtype=torch.long)
+    if rng is None:
+        rng = torch.Generator()
     for i, (ids, tgts, _) in enumerate(rows):
         T = min(ids.numel(), T_max)
         inputs[i, :T] = ids[:T]
         targets[i, :T] = tgts[:T]
-        # find first valid (response) position within the truncated row
         valid_idxs = torch.nonzero(tgts[:T] != -1, as_tuple=False)
         first_valid = int(valid_idxs[0].item()) if valid_idxs.numel() > 0 else T
-        depth_mask[i, :first_valid] = num_recur_prefill
+        use_split = torch.rand(1, generator=rng).item() < split_prob
+        if use_split:
+            # split: prompt=prefill, response+padding=decode (already default)
+            depth_mask[i, :first_valid] = num_recur_prefill
+        else:
+            # uniform: everything at prefill depth (matches original training)
+            depth_mask[i, :] = num_recur_prefill
     return inputs, targets, depth_mask
 
 
 @torch.no_grad()
 def run_val_loss(model, val_iter, pad_id, num_recur_prefill, num_recur_decode, device,
-                 batch_size, eval_batches, max_seq_len, autocast_ctx):
+                 batch_size, eval_batches, max_seq_len, autocast_ctx,
+                 split_prob=1.0, rng=None):
     model.eval()
     total_loss = 0.0
     total_tokens = 0
@@ -113,6 +126,7 @@ def run_val_loss(model, val_iter, pad_id, num_recur_prefill, num_recur_decode, d
                 break
             inputs, targets, depth_mask = collate_batch(
                 rows, pad_id, num_recur_prefill, num_recur_decode, max_seq_len,
+                split_prob=split_prob, rng=rng,
             )
             inputs = inputs.to(device, non_blocking=True)
             targets = targets.to(device, non_blocking=True)
@@ -153,6 +167,11 @@ def main():
                     help="Matches chat_sft.py default. Lower if training is unstable.")
     ap.add_argument("--weight-decay", type=float, default=0.0)
     ap.add_argument("--grad-clip", type=float, default=1.0)
+    ap.add_argument("--split-prob", type=float, default=1.0,
+                    help="Per-row probability of using the split depth schedule "
+                         "(prompt=prefill, response=decode). With prob 1-split_prob the row "
+                         "uses uniform num_recur_prefill (= original training regime). Mixed "
+                         "regime (e.g. 0.5) preserves full-depth capability while teaching split.")
     ap.add_argument("--dtype", default="bfloat16", choices=["bfloat16", "float32"])
     ap.add_argument("--out-tag", default=None)
     ap.add_argument("--save-step", type=int, default=None)
@@ -192,17 +211,28 @@ def main():
     examples_per_step = args.device_batch_size * args.grad_accum_steps
     print0(f"device_batch_size={args.device_batch_size}, grad_accum={args.grad_accum_steps}, "
            f"examples/step={examples_per_step}, num_iterations={args.num_iterations}")
-    print0(f"num_recur_prefill={args.num_recur_prefill}, num_recur_decode={args.num_recur_decode}")
+    print0(f"num_recur_prefill={args.num_recur_prefill}, num_recur_decode={args.num_recur_decode}, "
+           f"split_prob={args.split_prob}")
+    split_prob = args.split_prob
+    rng = torch.Generator()
+    rng.manual_seed(1234)
 
     t_start = time.perf_counter()
     for step in range(args.num_iterations):
         if step % args.eval_every == 0:
-            val_loss = run_val_loss(
+            val_loss_split = run_val_loss(
                 model, make_val_stream(), pad_id,
                 args.num_recur_prefill, args.num_recur_decode, device,
                 args.device_batch_size, args.eval_batches, args.max_seq_len, autocast_ctx,
+                split_prob=1.0, rng=rng,
             )
-            print0(f"step {step:05d} | val_loss/tok = {val_loss:.4f}")
+            val_loss_full = run_val_loss(
+                model, make_val_stream(), pad_id,
+                args.num_recur_prefill, args.num_recur_decode, device,
+                args.device_batch_size, args.eval_batches, args.max_seq_len, autocast_ctx,
+                split_prob=0.0, rng=rng,
+            )
+            print0(f"step {step:05d} | val_loss: split={val_loss_split:.4f} full={val_loss_full:.4f}")
 
         step_loss_sum = 0.0
         step_tokens = 0
@@ -256,12 +286,20 @@ def main():
             print0(f"step {step:05d}/{args.num_iterations} | "
                    f"train_loss/tok={ppt:.4f} | lrm={lrm:.4f} | tokens={step_tokens}{gn} | {elapsed:.0f}s")
 
-    val_loss = run_val_loss(
+    val_loss_split = run_val_loss(
         model, make_val_stream(), pad_id,
         args.num_recur_prefill, args.num_recur_decode, device,
         args.device_batch_size, args.eval_batches, args.max_seq_len, autocast_ctx,
+        split_prob=1.0, rng=rng,
     )
-    print0(f"Final val_loss/tok = {val_loss:.4f}")
+    val_loss_full = run_val_loss(
+        model, make_val_stream(), pad_id,
+        args.num_recur_prefill, args.num_recur_decode, device,
+        args.device_batch_size, args.eval_batches, args.max_seq_len, autocast_ctx,
+        split_prob=0.0, rng=rng,
+    )
+    val_loss = val_loss_split  # for save metadata
+    print0(f"Final val_loss: split={val_loss_split:.4f} full={val_loss_full:.4f}")
 
     base_dir = get_base_dir()
     src_tag = args.model_tag or f"d{model.config.n_layer}"
