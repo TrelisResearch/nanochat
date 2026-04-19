@@ -9,3 +9,6 @@ eval_bundle/
 tmp/
 bench_results/
 .claude/
+.DS_Store
+*.pdf
+papers/
