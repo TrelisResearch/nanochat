@@ -145,9 +145,17 @@ class KVCache:
         # Insert k, v into the cache
         self.kv_cache[layer_idx, 0, :, :, t0:t1] = k
         self.kv_cache[layer_idx, 1, :, :, t0:t1] = v
-        # Return the full cached keys/values up to current position (as a view)
+        # Return the full cached keys/values up to current position.
+        # When autograd is enabled (training with a cache, e.g. two-stage prefill/decode
+        # SFT), we clone the views so that future in-place writes to self.kv_cache
+        # cannot invalidate tensors that autograd saved for backward. Under
+        # torch.inference_mode() (normal inference) is_grad_enabled() is False and we
+        # skip the clone to avoid the extra memory/copy.
         key_view = self.kv_cache[layer_idx, 0, :, :, :t1]
         value_view = self.kv_cache[layer_idx, 1, :, :, :t1]
+        if torch.is_grad_enabled():
+            key_view = key_view.clone()
+            value_view = value_view.clone()
         # Increment pos after the last layer of the Transformer processes
         if layer_idx == self.kv_cache.size(0) - 1:
             self.pos = t1

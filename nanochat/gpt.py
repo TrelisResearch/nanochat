@@ -390,20 +390,23 @@ class GPT(nn.Module):
         # Structured to avoid if/else branching around tensor ops (torch.compile safe).
         gate_cost = torch.tensor(0.0, device=idx.device)
         B, T = idx.shape
-        # KV snapshot bookkeeping for prefill_kv_keep="first".
-        # Only active when we have a cache, multiple recurrences, and caller requests first.
-        want_first_snapshot = (
-            kv_cache is not None and num_recur > 1 and prefill_kv_keep == "first"
-        )
-        kv_first_snapshot = None
-        s_first_snapshot = None
-        recur_start = self.config.n_prelude
-        recur_end = self.config.n_prelude + self.config.n_recur_block
+        # Decide which recur iteration should be the one that writes to the KV cache.
+        # During training, writing on every iter triggers autograd "modified in-place"
+        # errors (iter i+1 overwrites the slot that iter i saved a view of for backward).
+        # So we only write on the iteration whose K/V we actually want to persist for
+        # downstream reads: iter 0 for keep=first, iter N-1 for keep=last. Intermediate
+        # iters compute attention without touching the cache — numerically identical
+        # because at those iters the cache view would just equal the local k,v anyway.
+        # Inference (under torch.inference_mode) doesn't see the grad issue; we keep the
+        # same selective-write logic for simplicity, then handle the keep=first restore
+        # only when we have a snapshot.
+        write_iter = 0 if prefill_kv_keep == "first" else (num_recur - 1)
         for i in range(num_recur):
             # Run recur blocks: u = recur(inject(concat(e, s)))
             u = self.inject(torch.cat([e, s], dim=-1))
+            iter_cache = kv_cache if i == write_iter else None
             for block in self.transformer.recur:
-                u = block(u, cos_sin, kv_cache)
+                u = block(u, cos_sin, iter_cache)
             g = self.config.gate_min + (1 - self.config.gate_min) * torch.sigmoid(self.gate_proj(torch.cat([u, s], dim=-1)))  # [B, T, 1] ∈ [gate_min, 1]
             # Scalar multipliers resolved at trace time (i is a Python int) — no tensor branches.
             # step 0: gate_scale=0 (forced full update, not penalised); steps 1+: gate_scale=1
@@ -411,25 +414,12 @@ class GPT(nn.Module):
             g_eff = gate_scale * g + (1.0 - gate_scale)  # i=0 → g_eff=1; i>0 → g_eff=g
             s = s + g_eff * (u - s)
             gate_cost = gate_cost + gate_scale * g.sum()  # always a tensor op, 0 at step 0
-            # Snapshot recur-layer K/V after iter 0 so we can restore them post-loop when
-            # prefill_kv_keep="first" — lets downstream decode attend to iter-0 K/V only.
-            if want_first_snapshot and i == 0 and kv_first_snapshot is None:
-                t0 = kv_cache.get_pos()
-                t1 = t0 + T
-                kv_first_snapshot = kv_cache.kv_cache[recur_start:recur_end, :, :, :, t0:t1, :].clone()
-                s_first_snapshot = s
             # Inference early exit (training: kv_cache is None, never fires)
-            if kv_cache is not None and g.max().item() < self.config.gate_threshold:
+            if not self.training and kv_cache is not None and g.max().item() < self.config.gate_threshold:
                 break
             # Truncated BPTT: detach gradients for early recurrences
             if self.config.bptt_k is not None and i < num_recur - self.config.bptt_k:
                 s = s.detach()
-        # Restore iter-0 K/V (and s for warm-start) if requested.
-        if kv_first_snapshot is not None:
-            t0 = kv_cache.get_pos()
-            t1 = t0 + T
-            kv_cache.kv_cache[recur_start:recur_end, :, :, :, t0:t1, :] = kv_first_snapshot
-            s = s_first_snapshot
         # Normalise over gated steps only (steps 1..num_recur-1)
         gated_steps = num_recur - 1
         gate_cost = gate_cost / (B * T * max(1, gated_steps))
