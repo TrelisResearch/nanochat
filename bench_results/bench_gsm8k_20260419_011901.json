@@ -1,0 +1,134 @@
+{
+  "args": {
+    "source": "sft",
+    "model_tag": "d20",
+    "step": null,
+    "max_problems": 256,
+    "max_new_tokens": 512,
+    "temperature": 0.0,
+    "top_k": 50,
+    "dtype": "bfloat16",
+    "full_rs": "1,2,4",
+    "split_prefill_rs": "2,4",
+    "no_full": false,
+    "no_split": false,
+    "out": "/cache/nanochat/bench_gsm8k_20260418_234518.json"
+  },
+  "model": {
+    "source": "sft",
+    "tag": "d20",
+    "step": null,
+    "n_params": 328337921,
+    "config": {
+      "sequence_len": 2048,
+      "vocab_size": 65536,
+      "n_layer": 20,
+      "n_head": 10,
+      "n_kv_head": 10,
+      "n_embd": 1280,
+      "n_prelude": 2,
+      "n_recur_block": 4,
+      "n_coda": 2,
+      "fixed_k": 4,
+      "gate_threshold": 0.01,
+      "gate_min": 0.0,
+      "recur_warm_start": true,
+      "bptt_k": 4,
+      "kv_cache_recur_budget": 1,
+      "inject_mode": "concat_linear"
+    }
+  },
+  "results": [
+    {
+      "num_passed": 1,
+      "num_problems": 256,
+      "accuracy": 0.00390625,
+      "elapsed_sec": 258.61323209700004,
+      "sec_per_problem": 1.0102079378789064,
+      "config": {
+        "name": "full_r1",
+        "prefill": 1,
+        "decode": 1,
+        "kv_keep": "last"
+      }
+    },
+    {
+      "num_passed": 10,
+      "num_problems": 256,
+      "accuracy": 0.0390625,
+      "elapsed_sec": 220.27888814199997,
+      "sec_per_problem": 0.8604644068046874,
+      "config": {
+        "name": "full_r2",
+        "prefill": 2,
+        "decode": 2,
+        "kv_keep": "last"
+      }
+    },
+    {
+      "num_passed": 19,
+      "num_problems": 256,
+      "accuracy": 0.07421875,
+      "elapsed_sec": 360.22517906800005,
+      "sec_per_problem": 1.4071296057343752,
+      "config": {
+        "name": "full_r4",
+        "prefill": 4,
+        "decode": 4,
+        "kv_keep": "last"
+      }
+    },
+    {
+      "num_passed": 2,
+      "num_problems": 256,
+      "accuracy": 0.0078125,
+      "elapsed_sec": 318.16601305100005,
+      "sec_per_problem": 1.242835988480469,
+      "config": {
+        "name": "split_p2_d1_last",
+        "prefill": 2,
+        "decode": 1,
+        "kv_keep": "last"
+      }
+    },
+    {
+      "num_passed": 1,
+      "num_problems": 256,
+      "accuracy": 0.00390625,
+      "elapsed_sec": 253.91437526100003,
+      "sec_per_problem": 0.9918530283632814,
+      "config": {
+        "name": "split_p2_d1_first",
+        "prefill": 2,
+        "decode": 1,
+        "kv_keep": "first"
+      }
+    },
+    {
+      "num_passed": 0,
+      "num_problems": 256,
+      "accuracy": 0.0,
+      "elapsed_sec": 338.99679731800006,
+      "sec_per_problem": 1.3242062395234377,
+      "config": {
+        "name": "split_p4_d1_last",
+        "prefill": 4,
+        "decode": 1,
+        "kv_keep": "last"
+      }
+    },
+    {
+      "num_passed": 1,
+      "num_problems": 256,
+      "accuracy": 0.00390625,
+      "elapsed_sec": 256.2390440009999,
+      "sec_per_problem": 1.000933765628906,
+      "config": {
+        "name": "split_p4_d1_first",
+        "prefill": 4,
+        "decode": 1,
+        "kv_keep": "first"
+      }
+    }
+  ]
+}

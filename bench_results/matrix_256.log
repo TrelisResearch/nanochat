@@ -1,0 +1,321 @@
+Note that running a local entrypoint in detached mode only keeps the last triggered Modal function alive after the parent process has been killed or disconnected.
+✓ Initialized. View run at 
+https://modal.com/apps/trelisresearch/dev-ronan/ap-M321NC1UeFkM5EoIQjtjj4
+✓ Created objects.
+├── 🔨 Created mount /Users/ronanmcgovern/TR/nanochat/modal_bench_gsm8k.py
+├── 🔨 Created mount /Users/ronanmcgovern/TR/nanochat
+└── 🔨 Created function run_bench.
+[local] launching on Modal (dev-ronan) with max_problems=256
+[setup] model+tokenizer already cached at /cache/nanochat
+[run] /usr/local/bin/python -m scripts.bench_gsm8k -i sft -g d20 -m 512 -t 0.0 -k 50 --full-rs 1,2,4 --split-prefill-rs 2,4 -x 256 --out /cache/nanochat/bench_gsm8k_20260418_234518.json
+2026-04-18 23:45:26,122 - nanochat.checkpoint_manager - [32m[1mINFO[0m - Loading model from /cache/nanochat/chatsft_checkpoints/d20 with step 700
+2026-04-18 23:45:27,221 - nanochat.checkpoint_manager - [32m[1mINFO[0m - Building model with config: {'sequence_len': 2048, 'vocab_size': 65536, 'n_layer': 20, 'n_head': 10, 'n_kv_head': 10, 'n_embd': 1280, 'n_prelude': 2, 'n_recur_block': 4, 'n_coda': 2, 'recur_warm_start': True, 'bptt_k': 4, 'kv_cache_recur_budget': 1, 'inject_mode': 'concat_linear', 'fixed_k': 4}
+2026-04-18 23:45:27,370 - nanochat.checkpoint_manager - [32m[1mINFO[0m - Missing keys (using init_weights values): ['gate_proj.weight', 'gate_proj.bias']
+2026-04-18 23:45:27,617 - httpx - [32m[1mINFO[0m - HTTP Request: HEAD https://huggingface.co/datasets/openai/gsm8k/resolve/main/README.md "HTTP/1.1 307 Temporary Redirect"
+2026-04-18 23:45:27,632 - httpx - [32m[1mINFO[0m - HTTP Request: HEAD https://huggingface.co/api/resolve-cache/datasets/openai/gsm8k/740312add88f781978c0658806c59bc2815b9866/README.md "HTTP/1.1 200 OK"
+2026-04-18 23:45:27,650 - httpx - [32m[1mINFO[0m - HTTP Request: GET https://huggingface.co/api/resolve-cache/datasets/openai/gsm8k/740312add88f781978c0658806c59bc2815b9866/README.md "HTTP/1.1 200 OK"
+2026-04-18 23:45:27,785 - httpx - [32m[1mINFO[0m - HTTP Request: HEAD https://huggingface.co/datasets/openai/gsm8k/resolve/740312add88f781978c0658806c59bc2815b9866/gsm8k.py "HTTP/1.1 404 Not Found"
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+2026-04-18 23:45:27,785 - huggingface_hub.utils._http - [33m[1mWARNING[0m - Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+2026-04-18 23:45:28,174 - httpx - [32m[1mINFO[0m - HTTP Request: HEAD https://s3.amazonaws.com/datasets.huggingface.co/datasets/datasets/openai/gsm8k/openai/gsm8k.py "HTTP/1.1 404 Not Found"
+2026-04-18 23:45:28,304 - httpx - [32m[1mINFO[0m - HTTP Request: GET https://huggingface.co/api/datasets/openai/gsm8k/revision/740312add88f781978c0658806c59bc2815b9866 "HTTP/1.1 200 OK"
+2026-04-18 23:45:28,433 - httpx - [32m[1mINFO[0m - HTTP Request: HEAD https://huggingface.co/datasets/openai/gsm8k/resolve/740312add88f781978c0658806c59bc2815b9866/.huggingface.yaml "HTTP/1.1 404 Not Found"
+2026-04-18 23:45:28,678 - httpx - [32m[1mINFO[0m - HTTP Request: GET https://datasets-server.huggingface.co/info?dataset=openai/gsm8k "HTTP/1.1 200 OK"
+2026-04-18 23:45:28,807 - httpx - [32m[1mINFO[0m - HTTP Request: GET https://huggingface.co/api/datasets/openai/gsm8k/tree/740312add88f781978c0658806c59bc2815b9866/main?recursive=true&expand=false "HTTP/1.1 200 OK"
+2026-04-18 23:45:28,934 - httpx - [32m[1mINFO[0m - HTTP Request: GET https://huggingface.co/api/datasets/openai/gsm8k/tree/740312add88f781978c0658806c59bc2815b9866?recursive=false&expand=false "HTTP/1.1 200 OK"
+2026-04-18 23:45:29,067 - httpx - [32m[1mINFO[0m - HTTP Request: HEAD https://huggingface.co/datasets/openai/gsm8k/resolve/740312add88f781978c0658806c59bc2815b9866/dataset_infos.json "HTTP/1.1 404 Not Found"
+2026-04-18 23:45:29,204 - httpx - [32m[1mINFO[0m - HTTP Request: HEAD https://huggingface.co/datasets/openai/gsm8k/resolve/740312add88f781978c0658806c59bc2815b9866/main/train-00000-of-00001.parquet "HTTP/1.1 302 Found"
+2026-04-18 23:45:29,343 - httpx - [32m[1mINFO[0m - HTTP Request: GET https://huggingface.co/api/datasets/openai/gsm8k/xet-read-token/740312add88f781978c0658806c59bc2815b9866 "HTTP/1.1 200 OK"
+2026-04-18 23:45:30,752 - httpx - [32m[1mINFO[0m - HTTP Request: HEAD https://huggingface.co/datasets/openai/gsm8k/resolve/740312add88f781978c0658806c59bc2815b9866/main/test-00000-of-00001.parquet "HTTP/1.1 302 Found"
+Autodetected device type: cuda
+Loading model: source=sft tag=d20 step=None
+Model loaded: 328.3M params, config=GPTConfig(sequence_len=2048, vocab_size=65536, n_layer=20, n_head=10, n_kv_head=10, n_embd=1280, n_prelude=2, n_recur_block=4, n_coda=2, fixed_k=4, gate_threshold=0.01, gate_min=0.0, recur_warm_start=True, bptt_k=4, kv_cache_recur_budget=1, inject_mode='concat_linear')
+
+[1AGenerating train split:   0%|          | 0/7473 [00:00<?, ? examples/s]
+[1AGenerating train split: 100%|██████████| 7473/7473 [00:00<00:00, 449505.72 examples/s]
+
+[1AGenerating test split:   0%|          | 0/1319 [00:00<?, ? examples/s]
+[1AGenerating test split: 100%|██████████| 1319/1319 [00:00<00:00, 318258.47 examples/s]
+GSM8K test set: 1319 problems; running up to 256 per config
+Running 7 configs:
+  full_r1: prefill=1 decode=1 kv_keep=last
+  full_r2: prefill=2 decode=2 kv_keep=last
+  full_r4: prefill=4 decode=4 kv_keep=last
+  split_p2_d1_last: prefill=2 decode=1 kv_keep=last
+  split_p2_d1_first: prefill=2 decode=1 kv_keep=first
+  split_p4_d1_last: prefill=4 decode=1 kv_keep=last
+  split_p4_d1_first: prefill=4 decode=1 kv_keep=first
+
+=== full_r1 ===
+  [8/256] pass=1 (12.5%) | 5.7s | 1.40 prob/s
+  [16/256] pass=1 (6.2%) | 14.0s | 1.14 prob/s
+  [24/256] pass=1 (4.2%) | 18.4s | 1.31 prob/s
+  [32/256] pass=1 (3.1%) | 31.4s | 1.02 prob/s
+  [40/256] pass=1 (2.5%) | 42.7s | 0.94 prob/s
+  [48/256] pass=1 (2.1%) | 48.2s | 1.00 prob/s
+  [56/256] pass=1 (1.8%) | 56.1s | 1.00 prob/s
+  [64/256] pass=1 (1.6%) | 63.1s | 1.01 prob/s
+  [72/256] pass=1 (1.4%) | 67.9s | 1.06 prob/s
+  [80/256] pass=1 (1.2%) | 75.6s | 1.06 prob/s
+  [88/256] pass=1 (1.1%) | 85.0s | 1.04 prob/s
+  [96/256] pass=1 (1.0%) | 94.2s | 1.02 prob/s
+  [104/256] pass=1 (1.0%) | 100.5s | 1.03 prob/s
+  [112/256] pass=1 (0.9%) | 109.0s | 1.03 prob/s
+  [120/256] pass=1 (0.8%) | 117.7s | 1.02 prob/s
+  [128/256] pass=1 (0.8%) | 124.9s | 1.02 prob/s
+  [136/256] pass=1 (0.7%) | 132.5s | 1.03 prob/s
+  [144/256] pass=1 (0.7%) | 139.0s | 1.04 prob/s
+  [152/256] pass=1 (0.7%) | 151.9s | 1.00 prob/s
+  [160/256] pass=1 (0.6%) | 163.8s | 0.98 prob/s
+  [168/256] pass=1 (0.6%) | 171.8s | 0.98 prob/s
+  [176/256] pass=1 (0.6%) | 181.9s | 0.97 prob/s
+  [184/256] pass=1 (0.5%) | 190.4s | 0.97 prob/s
+  [192/256] pass=1 (0.5%) | 198.9s | 0.97 prob/s
+  [200/256] pass=1 (0.5%) | 205.5s | 0.97 prob/s
+  [208/256] pass=1 (0.5%) | 212.4s | 0.98 prob/s
+  [216/256] pass=1 (0.5%) | 217.9s | 0.99 prob/s
+  [224/256] pass=1 (0.4%) | 222.9s | 1.00 prob/s
+  [232/256] pass=1 (0.4%) | 229.2s | 1.01 prob/s
+  [240/256] pass=1 (0.4%) | 241.4s | 0.99 prob/s
+  [248/256] pass=1 (0.4%) | 252.3s | 0.98 prob/s
+  [256/256] pass=1 (0.4%) | 258.6s | 0.99 prob/s
+  -> acc=0.39% (1/256) in 258.6s (1.01 s/prob)
+
+=== full_r2 ===
+  [8/256] pass=0 (0.0%) | 5.2s | 1.55 prob/s
+  [16/256] pass=2 (12.5%) | 10.7s | 1.49 prob/s
+  [24/256] pass=2 (8.3%) | 14.4s | 1.67 prob/s
+  [32/256] pass=2 (6.2%) | 21.0s | 1.52 prob/s
+  [40/256] pass=2 (5.0%) | 28.4s | 1.41 prob/s
+  [48/256] pass=2 (4.2%) | 37.8s | 1.27 prob/s
+  [56/256] pass=4 (7.1%) | 45.0s | 1.25 prob/s
+  [64/256] pass=5 (7.8%) | 51.2s | 1.25 prob/s
+  [72/256] pass=5 (6.9%) | 54.6s | 1.32 prob/s
+  [80/256] pass=5 (6.2%) | 59.7s | 1.34 prob/s
+  [88/256] pass=5 (5.7%) | 68.9s | 1.28 prob/s
+  [96/256] pass=5 (5.2%) | 80.2s | 1.20 prob/s
+  [104/256] pass=5 (4.8%) | 84.6s | 1.23 prob/s
+  [112/256] pass=5 (4.5%) | 91.0s | 1.23 prob/s
+  [120/256] pass=6 (5.0%) | 100.8s | 1.19 prob/s
+  [128/256] pass=6 (4.7%) | 108.5s | 1.18 prob/s
+  [136/256] pass=6 (4.4%) | 115.4s | 1.18 prob/s
+  [144/256] pass=6 (4.2%) | 123.7s | 1.16 prob/s
+  [152/256] pass=6 (3.9%) | 131.3s | 1.16 prob/s
+  [160/256] pass=6 (3.8%) | 138.4s | 1.16 prob/s
+  [168/256] pass=7 (4.2%) | 142.2s | 1.18 prob/s
+  [176/256] pass=7 (4.0%) | 149.4s | 1.18 prob/s
+  [184/256] pass=7 (3.8%) | 160.0s | 1.15 prob/s
+  [192/256] pass=8 (4.2%) | 169.8s | 1.13 prob/s
+  [200/256] pass=8 (4.0%) | 173.8s | 1.15 prob/s
+  [208/256] pass=8 (3.8%) | 178.2s | 1.17 prob/s
+  [216/256] pass=8 (3.7%) | 181.8s | 1.19 prob/s
+  [224/256] pass=10 (4.5%) | 186.4s | 1.20 prob/s
+  [232/256] pass=10 (4.3%) | 196.1s | 1.18 prob/s
+  [240/256] pass=10 (4.2%) | 200.6s | 1.20 prob/s
+  [248/256] pass=10 (4.0%) | 211.9s | 1.17 prob/s
+  [256/256] pass=10 (3.9%) | 220.3s | 1.16 prob/s
+  -> acc=3.91% (10/256) in 220.3s (0.86 s/prob)
+
+=== full_r4 ===
+  [8/256] pass=0 (0.0%) | 12.1s | 0.66 prob/s
+  [16/256] pass=1 (6.2%) | 27.0s | 0.59 prob/s
+  [24/256] pass=3 (12.5%) | 33.8s | 0.71 prob/s
+  [32/256] pass=4 (12.5%) | 41.0s | 0.78 prob/s
+  [40/256] pass=4 (10.0%) | 53.5s | 0.75 prob/s
+  [48/256] pass=6 (12.5%) | 64.2s | 0.75 prob/s
+  [56/256] pass=7 (12.5%) | 75.2s | 0.74 prob/s
+  [64/256] pass=8 (12.5%) | 83.8s | 0.76 prob/s
+  [72/256] pass=8 (11.1%) | 92.3s | 0.78 prob/s
+  [80/256] pass=9 (11.2%) | 100.7s | 0.79 prob/s
+  [88/256] pass=9 (10.2%) | 108.3s | 0.81 prob/s
+  [96/256] pass=9 (9.4%) | 126.6s | 0.76 prob/s
+  [104/256] pass=9 (8.7%) | 142.0s | 0.73 prob/s
+  [112/256] pass=9 (8.0%) | 157.3s | 0.71 prob/s
+  [120/256] pass=9 (7.5%) | 167.4s | 0.72 prob/s
+  [128/256] pass=11 (8.6%) | 186.0s | 0.69 prob/s
+  [136/256] pass=11 (8.1%) | 199.0s | 0.68 prob/s
+  [144/256] pass=11 (7.6%) | 214.9s | 0.67 prob/s
+  [152/256] pass=11 (7.2%) | 224.1s | 0.68 prob/s
+  [160/256] pass=11 (6.9%) | 234.6s | 0.68 prob/s
+  [168/256] pass=12 (7.1%) | 246.4s | 0.68 prob/s
+  [176/256] pass=12 (6.8%) | 256.8s | 0.69 prob/s
+  [184/256] pass=12 (6.5%) | 267.2s | 0.69 prob/s
+  [192/256] pass=14 (7.3%) | 281.5s | 0.68 prob/s
+  [200/256] pass=14 (7.0%) | 292.2s | 0.68 prob/s
+  [208/256] pass=15 (7.2%) | 303.3s | 0.69 prob/s
+  [216/256] pass=16 (7.4%) | 309.7s | 0.70 prob/s
+  [224/256] pass=16 (7.1%) | 318.0s | 0.70 prob/s
+  [232/256] pass=18 (7.8%) | 327.7s | 0.71 prob/s
+  [240/256] pass=19 (7.9%) | 340.8s | 0.70 prob/s
+  [248/256] pass=19 (7.7%) | 350.5s | 0.71 prob/s
+  [256/256] pass=19 (7.4%) | 360.2s | 0.71 prob/s
+  -> acc=7.42% (19/256) in 360.2s (1.41 s/prob)
+
+=== split_p2_d1_last ===
+  [8/256] pass=0 (0.0%) | 9.1s | 0.88 prob/s
+  [16/256] pass=0 (0.0%) | 17.5s | 0.91 prob/s
+  [24/256] pass=0 (0.0%) | 24.2s | 0.99 prob/s
+  [32/256] pass=0 (0.0%) | 33.7s | 0.95 prob/s
+  [40/256] pass=0 (0.0%) | 46.6s | 0.86 prob/s
+  [48/256] pass=0 (0.0%) | 53.7s | 0.89 prob/s
+  [56/256] pass=0 (0.0%) | 66.7s | 0.84 prob/s
+  [64/256] pass=0 (0.0%) | 81.5s | 0.79 prob/s
+  [72/256] pass=0 (0.0%) | 87.9s | 0.82 prob/s
+  [80/256] pass=0 (0.0%) | 96.4s | 0.83 prob/s
+  [88/256] pass=0 (0.0%) | 109.8s | 0.80 prob/s
+  [96/256] pass=0 (0.0%) | 120.1s | 0.80 prob/s
+  [104/256] pass=0 (0.0%) | 126.3s | 0.82 prob/s
+  [112/256] pass=1 (0.9%) | 135.4s | 0.83 prob/s
+  [120/256] pass=2 (1.7%) | 146.5s | 0.82 prob/s
+  [128/256] pass=2 (1.6%) | 159.3s | 0.80 prob/s
+  [136/256] pass=2 (1.5%) | 167.3s | 0.81 prob/s
+  [144/256] pass=2 (1.4%) | 175.8s | 0.82 prob/s
+  [152/256] pass=2 (1.3%) | 187.3s | 0.81 prob/s
+  [160/256] pass=2 (1.2%) | 199.1s | 0.80 prob/s
+  [168/256] pass=2 (1.2%) | 209.9s | 0.80 prob/s
+  [176/256] pass=2 (1.1%) | 221.3s | 0.80 prob/s
+  [184/256] pass=2 (1.1%) | 231.3s | 0.80 prob/s
+  [192/256] pass=2 (1.0%) | 239.4s | 0.80 prob/s
+  [200/256] pass=2 (1.0%) | 249.1s | 0.80 prob/s
+  [208/256] pass=2 (1.0%) | 258.8s | 0.80 prob/s
+  [216/256] pass=2 (0.9%) | 267.1s | 0.81 prob/s
+  [224/256] pass=2 (0.9%) | 274.8s | 0.82 prob/s
+  [232/256] pass=2 (0.9%) | 284.4s | 0.82 prob/s
+  [240/256] pass=2 (0.8%) | 295.0s | 0.81 prob/s
+  [248/256] pass=2 (0.8%) | 308.3s | 0.80 prob/s
+  [256/256] pass=2 (0.8%) | 318.2s | 0.80 prob/s
+  -> acc=0.78% (2/256) in 318.2s (1.24 s/prob)
+
+=== split_p2_d1_first ===
+  [8/256] pass=1 (12.5%) | 5.2s | 1.53 prob/s
+  [16/256] pass=1 (6.2%) | 13.3s | 1.21 prob/s
+  [24/256] pass=1 (4.2%) | 17.5s | 1.37 prob/s
+  [32/256] pass=1 (3.1%) | 30.2s | 1.06 prob/s
+  [40/256] pass=1 (2.5%) | 41.3s | 0.97 prob/s
+  [48/256] pass=1 (2.1%) | 46.8s | 1.02 prob/s
+  [56/256] pass=1 (1.8%) | 54.6s | 1.03 prob/s
+  [64/256] pass=1 (1.6%) | 61.6s | 1.04 prob/s
+  [72/256] pass=1 (1.4%) | 66.3s | 1.09 prob/s
+  [80/256] pass=1 (1.2%) | 73.8s | 1.08 prob/s
+  [88/256] pass=1 (1.1%) | 83.1s | 1.06 prob/s
+  [96/256] pass=1 (1.0%) | 92.3s | 1.04 prob/s
+  [104/256] pass=1 (1.0%) | 98.5s | 1.06 prob/s
+  [112/256] pass=1 (0.9%) | 106.8s | 1.05 prob/s
+  [120/256] pass=1 (0.8%) | 115.4s | 1.04 prob/s
+  [128/256] pass=1 (0.8%) | 122.5s | 1.04 prob/s
+  [136/256] pass=1 (0.7%) | 130.1s | 1.05 prob/s
+  [144/256] pass=1 (0.7%) | 136.5s | 1.05 prob/s
+  [152/256] pass=1 (0.7%) | 149.3s | 1.02 prob/s
+  [160/256] pass=1 (0.6%) | 161.1s | 0.99 prob/s
+  [168/256] pass=1 (0.6%) | 168.9s | 0.99 prob/s
+  [176/256] pass=1 (0.6%) | 178.8s | 0.98 prob/s
+  [184/256] pass=1 (0.5%) | 187.0s | 0.98 prob/s
+  [192/256] pass=1 (0.5%) | 195.4s | 0.98 prob/s
+  [200/256] pass=1 (0.5%) | 201.9s | 0.99 prob/s
+  [208/256] pass=1 (0.5%) | 208.6s | 1.00 prob/s
+  [216/256] pass=1 (0.5%) | 214.0s | 1.01 prob/s
+  [224/256] pass=1 (0.4%) | 218.9s | 1.02 prob/s
+  [232/256] pass=1 (0.4%) | 225.1s | 1.03 prob/s
+  [240/256] pass=1 (0.4%) | 237.0s | 1.01 prob/s
+  [248/256] pass=1 (0.4%) | 247.6s | 1.00 prob/s
+  [256/256] pass=1 (0.4%) | 253.9s | 1.01 prob/s
+  -> acc=0.39% (1/256) in 253.9s (0.99 s/prob)
+
+=== split_p4_d1_last ===
+  [8/256] pass=0 (0.0%) | 12.3s | 0.65 prob/s
+  [16/256] pass=0 (0.0%) | 23.9s | 0.67 prob/s
+  [24/256] pass=0 (0.0%) | 29.9s | 0.80 prob/s
+  [32/256] pass=0 (0.0%) | 40.8s | 0.78 prob/s
+  [40/256] pass=0 (0.0%) | 55.6s | 0.72 prob/s
+  [48/256] pass=0 (0.0%) | 65.6s | 0.73 prob/s
+  [56/256] pass=0 (0.0%) | 76.8s | 0.73 prob/s
+  [64/256] pass=0 (0.0%) | 85.0s | 0.75 prob/s
+  [72/256] pass=0 (0.0%) | 91.1s | 0.79 prob/s
+  [80/256] pass=0 (0.0%) | 100.7s | 0.79 prob/s
+  [88/256] pass=0 (0.0%) | 113.8s | 0.77 prob/s
+  [96/256] pass=0 (0.0%) | 126.8s | 0.76 prob/s
+  [104/256] pass=0 (0.0%) | 137.9s | 0.75 prob/s
+  [112/256] pass=0 (0.0%) | 144.8s | 0.77 prob/s
+  [120/256] pass=0 (0.0%) | 155.3s | 0.77 prob/s
+  [128/256] pass=0 (0.0%) | 165.6s | 0.77 prob/s
+  [136/256] pass=0 (0.0%) | 177.6s | 0.77 prob/s
+  [144/256] pass=0 (0.0%) | 187.7s | 0.77 prob/s
+  [152/256] pass=0 (0.0%) | 202.3s | 0.75 prob/s
+  [160/256] pass=0 (0.0%) | 216.4s | 0.74 prob/s
+  [168/256] pass=0 (0.0%) | 227.8s | 0.74 prob/s
+  [176/256] pass=0 (0.0%) | 237.5s | 0.74 prob/s
+  [184/256] pass=0 (0.0%) | 250.2s | 0.74 prob/s
+  [192/256] pass=0 (0.0%) | 259.0s | 0.74 prob/s
+  [200/256] pass=0 (0.0%) | 267.6s | 0.75 prob/s
+  [208/256] pass=0 (0.0%) | 275.6s | 0.75 prob/s
+  [216/256] pass=0 (0.0%) | 281.2s | 0.77 prob/s
+  [224/256] pass=0 (0.0%) | 292.1s | 0.77 prob/s
+  [232/256] pass=0 (0.0%) | 303.5s | 0.76 prob/s
+  [240/256] pass=0 (0.0%) | 316.9s | 0.76 prob/s
+  [248/256] pass=0 (0.0%) | 325.9s | 0.76 prob/s
+  [256/256] pass=0 (0.0%) | 339.0s | 0.76 prob/s
+  -> acc=0.00% (0/256) in 339.0s (1.32 s/prob)
+
+=== split_p4_d1_first ===
+  [8/256] pass=1 (12.5%) | 5.2s | 1.53 prob/s
+  [16/256] pass=1 (6.2%) | 13.4s | 1.20 prob/s
+  [24/256] pass=1 (4.2%) | 17.7s | 1.35 prob/s
+  [32/256] pass=1 (3.1%) | 30.5s | 1.05 prob/s
+  [40/256] pass=1 (2.5%) | 41.7s | 0.96 prob/s
+  [48/256] pass=1 (2.1%) | 47.3s | 1.01 prob/s
+  [56/256] pass=1 (1.8%) | 55.1s | 1.02 prob/s
+  [64/256] pass=1 (1.6%) | 62.0s | 1.03 prob/s
+  [72/256] pass=1 (1.4%) | 66.8s | 1.08 prob/s
+  [80/256] pass=1 (1.2%) | 74.3s | 1.08 prob/s
+  [88/256] pass=1 (1.1%) | 83.8s | 1.05 prob/s
+  [96/256] pass=1 (1.0%) | 92.9s | 1.03 prob/s
+  [104/256] pass=1 (1.0%) | 99.2s | 1.05 prob/s
+  [112/256] pass=1 (0.9%) | 107.6s | 1.04 prob/s
+  [120/256] pass=1 (0.8%) | 116.3s | 1.03 prob/s
+  [128/256] pass=1 (0.8%) | 123.5s | 1.04 prob/s
+  [136/256] pass=1 (0.7%) | 131.0s | 1.04 prob/s
+  [144/256] pass=1 (0.7%) | 137.5s | 1.05 prob/s
+  [152/256] pass=1 (0.7%) | 150.5s | 1.01 prob/s
+  [160/256] pass=1 (0.6%) | 162.2s | 0.99 prob/s
+  [168/256] pass=1 (0.6%) | 170.1s | 0.99 prob/s
+  [176/256] pass=1 (0.6%) | 179.9s | 0.98 prob/s
+  [184/256] pass=1 (0.5%) | 188.2s | 0.98 prob/s
+  [192/256] pass=1 (0.5%) | 196.6s | 0.98 prob/s
+  [200/256] pass=1 (0.5%) | 203.2s | 0.98 prob/s
+  [208/256] pass=1 (0.5%) | 210.0s | 0.99 prob/s
+  [216/256] pass=1 (0.5%) | 215.5s | 1.00 prob/s
+  [224/256] pass=1 (0.4%) | 220.5s | 1.02 prob/s
+  [232/256] pass=1 (0.4%) | 226.8s | 1.02 prob/s
+  [240/256] pass=1 (0.4%) | 239.0s | 1.00 prob/s
+  [248/256] pass=1 (0.4%) | 249.8s | 0.99 prob/s
+  [256/256] pass=1 (0.4%) | 256.2s | 1.00 prob/s
+  -> acc=0.39% (1/256) in 256.2s (1.00 s/prob)
+
+Wrote results to: /cache/nanochat/bench_gsm8k_20260418_234518.json
+
+==============================================================================
+config                        acc      N    time(s)   s/prob
+------------------------------------------------------------------------------
+full_r1                     0.39%    256      258.6     1.01
+full_r2                     3.91%    256      220.3     0.86
+full_r4                     7.42%    256      360.2     1.41
+split_p2_d1_last            0.78%    256      318.2     1.24
+split_p2_d1_first           0.39%    256      253.9     0.99
+split_p4_d1_last            0.00%    256      339.0     1.32
+split_p4_d1_first           0.39%    256      256.2     1.00
+==============================================================================
+[local] wrote bench_results/bench_gsm8k_20260419_011901.json
+
+==============================================================================
+config                        acc      N    time(s)   s/prob
+------------------------------------------------------------------------------
+full_r1                     0.39%    256      258.6     1.01
+full_r2                     3.91%    256      220.3     0.86
+full_r4                     7.42%    256      360.2     1.41
+split_p2_d1_last            0.78%    256      318.2     1.24
+split_p2_d1_first           0.39%    256      253.9     0.99
+split_p4_d1_last            0.00%    256      339.0     1.32
+split_p4_d1_first           0.39%    256      256.2     1.00
+==============================================================================
+✓ App completed. View run at 
+https://modal.com/apps/trelisresearch/dev-ronan/ap-M321NC1UeFkM5EoIQjtjj4
